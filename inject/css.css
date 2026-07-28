@@ -1,0 +1,144 @@
+      /* ============ 四时壁纸自动切换（哆啦A梦主题）============ */
+      /* 壁纸层：固定铺满全屏，置于最底；UI 全部透明浮在其上 */
+      #doraemon-wallpaper,
+      #doraemon-wallpaper .dw-layer {
+        position: fixed;
+        inset: 0;
+        width: 100vw;
+        height: 100vh;
+        pointer-events: none;
+      }
+      #doraemon-wallpaper {
+        z-index: -1;
+        background: #0b1020;
+      }
+      #dw-rain-canvas {
+        z-index: 100 !important;
+      }
+      #doraemon-wallpaper .dw-layer {
+        background-size: var(--dw-fit, cover);
+        background-position: center center;
+        background-repeat: no-repeat;
+        opacity: 0;
+        transition: opacity 1.2s ease-in-out;
+        will-change: opacity;
+      }
+      /* 视频壁纸也跟随缩放模式 */
+      #doraemon-wallpaper video {
+        object-fit: var(--dw-fit, cover) !important;
+      }
+      #doraemon-wallpaper .dw-layer.dw-active {
+        opacity: 1;
+      }
+      /* #root 保持 position:static，不创建新的包含块，避免布局偏移 */
+      /* 壁纸层 z-index: -1 自然位于 #root 之下 */
+
+      /* ============ 全透明 UI ============ */
+      html.zcode-wallpaper-on,
+      html.zcode-wallpaper-on body,
+      html.zcode-wallpaper-on #root {
+        background: transparent !important;
+      }
+      html.zcode-wallpaper-on .bg-background,
+      html.zcode-wallpaper-on .bg-background-alt,
+      html.zcode-wallpaper-on .bg-background-win-alt,
+      html.zcode-wallpaper-on .\[background-color\:var\(--color-background\)\],
+      html.zcode-wallpaper-on .bg-\[var\(--color-background\)\],
+      html.zcode-wallpaper-on .hover\:bg-background:hover,
+      /* 兜底：所有非交互容器的实色背景一律清空，避免遮挡壁纸 */
+      html.zcode-wallpaper-on body *:not(button):not([role="button"]):not(input):not(textarea):not(select):not(.no-clear-bg) {
+        background-color: transparent !important;
+      }
+
+      /* ============ 文字描边方案 ============ */
+      /* 使用 -webkit-text-stroke + paint-order（描边在填充外，不侵入字体内部）
+         替代旧的 4 方向 text-shadow（小字重影），配合亮度自适应调粗细 */
+      html.zcode-wallpaper-on {
+        --dw-text: #ffffff;
+        --dw-text-soft: rgba(255, 255, 255, 0.75);
+        --dw-stroke-width: 0.3px;
+        --dw-stroke-color: rgba(0, 0, 0, 0.85);
+        --dw-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+        --dw-input-bg: rgba(10, 20, 40, 0.35);
+        --dw-input-text: #ffffff;
+        --dw-btn-border: rgba(255, 255, 255, 0.45);
+        --dw-btn-hover-bg: rgba(255, 255, 255, 0.18);
+        --dw-icon-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+      }
+
+      /* input/textarea/select 用半透明底 */
+      html.zcode-wallpaper-on input,
+      html.zcode-wallpaper-on textarea,
+      html.zcode-wallpaper-on select {
+        background-color: var(--dw-input-bg) !important;
+        color: var(--dw-input-text) !important;
+        backdrop-filter: blur(4px);
+      }
+      html.zcode-wallpaper-on input::placeholder,
+      html.zcode-wallpaper-on textarea::placeholder {
+        color: var(--dw-text-soft) !important;
+      }
+
+      /* ============ 全局文字 ============ */
+      html.zcode-wallpaper-on body,
+      html.zcode-wallpaper-on body *:not(svg):not(path):not(code):not(pre) {
+        color: var(--dw-text) !important;
+        -webkit-text-stroke: var(--dw-stroke-width) var(--dw-stroke-color);
+        paint-order: stroke fill;
+        text-shadow: var(--dw-shadow);
+      }
+      /* 代码块用暗色，重置描边 */
+      html.zcode-wallpaper-on code,
+      html.zcode-wallpaper-on pre,
+      html.zcode-wallpaper-on .shiki,
+      html.zcode-wallpaper-on .hljs {
+        background-color: rgba(10, 15, 25, 0.72) !important;
+        color: #e6edf3 !important;
+        -webkit-text-stroke: 0 !important;
+        text-shadow: none !important;
+      }
+      /* 选中态 */
+      html.zcode-wallpaper-on ::selection {
+        background-color: rgba(126, 182, 255, 0.55) !important;
+        color: #ffffff !important;
+      }
+
+      /* ============ 按钮 ============ */
+      html.zcode-wallpaper-on button,
+      html.zcode-wallpaper-on [role="button"],
+      html.zcode-wallpaper-on a.btn,
+      html.zcode-wallpaper-on .btn {
+        background-color: transparent !important;
+        color: var(--dw-text) !important;
+        border: none !important;
+        backdrop-filter: blur(4px);
+        -webkit-text-stroke: var(--dw-stroke-width) var(--dw-stroke-color);
+        paint-order: stroke fill;
+        text-shadow: var(--dw-shadow);
+      }
+      html.zcode-wallpaper-on button:hover,
+      html.zcode-wallpaper-on [role="button"]:hover,
+      html.zcode-wallpaper-on .btn:hover {
+        background-color: var(--dw-btn-hover-bg) !important;
+      }
+      /* 主操作按钮保留品牌色 */
+      html.zcode-wallpaper-on .bg-primary,
+      html.zcode-wallpaper-on button.bg-primary,
+      html.zcode-wallpaper-on .bg-brand {
+        background-color: rgba(74, 144, 226, 0.7) !important;
+        color: #ffffff !important;
+        border: none !important;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      }
+      html.zcode-wallpaper-on .bg-primary:hover,
+      html.zcode-wallpaper-on button.bg-primary:hover,
+      html.zcode-wallpaper-on .bg-brand:hover {
+        background-color: rgba(74, 144, 226, 0.88) !important;
+      }
+
+      /* 图标 SVG 加投影 */
+      html.zcode-wallpaper-on svg,
+      html.zcode-wallpaper-on [class*="icon"],
+      html.zcode-wallpaper-on [class*="Icon"] {
+        filter: var(--dw-icon-shadow);
+      }

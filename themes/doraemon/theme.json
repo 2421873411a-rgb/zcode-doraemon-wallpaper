@@ -1,0 +1,12 @@
+{
+  "id": "doraemon",
+  "name": "哆啦A梦四时",
+  "type": "static",
+  "periods": true,
+  "weather": true,
+  "desc": "四时段自动切换 + 晴雨双套，白天黑字夜晚白字",
+  "assets": {
+    "clear": { "morning": "clear/doraemon-morning.png", "day": "clear/doraemon-day.png", "dusk": "clear/doraemon-dusk.png", "night": "clear/doraemon-night.png" },
+    "rain":  { "morning": "rain/doraemon-morning.png",  "day": "rain/doraemon-day.png",  "dusk": "rain/doraemon-dusk.png",  "night": "rain/doraemon-night.png" }
+  }
+}

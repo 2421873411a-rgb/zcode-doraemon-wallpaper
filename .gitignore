@@ -1,0 +1,30 @@
+# 依赖
+node_modules/
+
+# 打包产物
+versions/
+*.asar
+*.bak
+
+# 视频壁纸文件（版权/体积）
+themes/cloud-sea/
+themes/lazy-sheep/
+
+# 壁纸原图（体积大，仅保留 script 即可）
+# wallpapers/ 保留 — doraemon 壁纸可开源
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 临时文件
+*.tmp
+tmp/
+_pack_fix.js

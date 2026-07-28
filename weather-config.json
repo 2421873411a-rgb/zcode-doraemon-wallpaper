@@ -1,0 +1,37 @@
+{
+  "_comment": "ZCode 哆啦A梦壁纸 · 天气配置。坐标已脱敏，请替换为你的实际位置。",
+
+  "weather": {
+    "manual": "auto",
+    "_comment_manual": "手动天气覆盖：clear 强制晴 / rain 强制雨 / auto 跟随自动检测。快捷键 Ctrl+Shift+R 或右下角按钮会改写这个值。",
+    "autoEnabled": false,
+    "_comment_autoEnabled": "启用 open-meteo 自动检测后设为 true。"
+  },
+
+  "location": {
+    "_comment": "两个常驻点（示例：北京）。工作日白天在工作地，其余时间在家。",
+    "home": { "name": "家", "lat": 39.9042, "lon": 116.4074 },
+    "work": { "name": "工作地（工作日白天）", "lat": 39.9142, "lon": 116.4174 }
+  },
+
+  "schedule": {
+    "_comment": "位置时间表。weekday=1表示周一...6=周六,0=周日。白天指 08:00-17:00。",
+    "workDays": [1, 2, 3, 4, 5],
+    "workHourStart": 8,
+    "workHourEnd": 17,
+    "_comment_schedule": "周一~周五 08:00-17:00 在 work，其他时间在 home。"
+  },
+
+  "rainThreshold": {
+    "_comment": "判断下雨的阈值，带滞回防止临界抖动。",
+    "enterMmPerHour": 0.1,
+    "enterProbability": 0.5,
+    "exitMmPerHour": 0.05,
+    "exitProbability": 0.3
+  },
+
+  "refresh": {
+    "_comment": "天气API刷新间隔（毫秒）。",
+    "weatherIntervalMs": 1200000
+  }
+}
