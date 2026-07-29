@@ -294,20 +294,61 @@ async function main() {
   if (!exists(idxPath)) { rmrf(workDir); die(`解包后找不到 out/renderer/index.html，路径结构可能已变化。`); }
   ok('解包完成');
 
-  // 3b) 构造主题路径注入：将 BASE token 替换为实际路径
+  // 3b) 同步内置主题到外部目录 + 构造 BASE token
   const themesDir = path.join(resourcesDir, 'themes');
+  
+  // —— syncBundledThemes: 将项目内置主题同步到 ZCode resources/themes/
+  function syncBundledThemes(srcDir, destDir) {
+    const BUNDLED = ['doraemon']; // 安装器管理的主题（用户主题不会被覆盖）
+    fs.mkdirSync(destDir, { recursive: true });
+    
+    // 读取现有注册表（保护用户自建主题）
+    let existing = [];
+    const regPath = path.join(destDir, '_registry.json');
+    if (exists(regPath)) { try { existing = JSON.parse(read(regPath)).themes || []; } catch(e){} }
+    
+    // 复制/更新内置主题
+    for (const id of BUNDLED) {
+      const src = path.join(srcDir, id), dest = path.join(destDir, id);
+      if (!exists(src)) { warn(`内置主题 ${id} 源目录缺失`); continue; }
+      rmrf(dest); fs.cpSync(src, dest, { recursive: true });
+      info(`内置主题 ${id} → 已同步`);
+    }
+    
+    // 合并主题列表（内置 + 用户）并校验
+    const all = [...new Set([...BUNDLED, ...existing.filter(t => !BUNDLED.includes(t))])];
+    const valid = [];
+    for (const id of all) {
+      const d = path.join(destDir, id);
+      if (!exists(d)) continue;
+      const tj = path.join(d, 'theme.json');
+      if (!exists(tj)) { warn(`主题 ${id} 缺少 theme.json`); continue; }
+      try {
+        const t = JSON.parse(read(tj));
+        if (!t.id || !t.name || !t.type) { warn(`主题 ${id} theme.json 缺字段`); continue; }
+        valid.push(id);
+      } catch(e) { warn(`主题 ${id} theme.json 解析失败`); }
+    }
+    const def = valid.includes('doraemon') ? 'doraemon' : (valid[0] || 'doraemon');
+    fs.writeFileSync(regPath, JSON.stringify({ themes: valid, default: def }, null, 2));
+    ok(`_registry.json 已更新（${valid.length} 个主题，默认: ${def}）`);
+    return valid;
+  }
+  
+  // 执行同步（项目 themes/ → ZCode resources/themes/）
+  step('3c/6  部署内置主题');
+  const projectThemes = path.join(SCRIPT_DIR, 'themes');
+  syncBundledThemes(projectThemes, themesDir);
+  
+  // 构造 file:// URL
   const themesBaseUrl = 'file:///' + themesDir.replace(/\\/g, '/') + '/';
-  // 读取兜底主题元数据（doraemon 主题的 theme.json）
+  // 读取兜底主题元数据（同步后一定存在）
   let fallbackThemes = { __default__: 'doraemon' };
   try {
     const doraTheme = read(path.join(themesDir, 'doraemon', 'theme.json'));
-    // 合并成 { __default__, doraemon }，确保兜底时内置主题可用
     const doraJson = JSON.parse(doraTheme);
     fallbackThemes[doraJson.id] = doraJson;
-  } catch (e) {
-    // themes 目录还不存在或缺少文件，使用最小兜底
-    warn('未找到外部主题目录，使用最小兜底');
-  }
+  } catch (e) { warn('兜底主题读取失败，使用最小配置'); }
   // 替换 engineTpl 中的占位符
   if (engineTpl) {
     engineTpl = engineTpl.replace('__BASE_TOKEN__', JSON.stringify(themesBaseUrl));
@@ -531,23 +572,33 @@ async function main() {
   }
   ok(`完整性校验通过（${needMarks.length} 标记 + ${wpCount} 壁纸齐全）`);
 
-  // 6) 备份 + 替换
-  step('6/6  备份原文件并替换');
+  // 6) 备份 + 原子替换
+  step('6/6  备份原文件并原子替换');
   const ts = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
   const bakPath = path.join(resourcesDir, `app.asar.bak.${ts}`);
+  try { fs.copyFileSync(asarPath, bakPath); ok(`已备份原版：${path.basename(bakPath)}`); }
+  catch (e) { rmrf(workDir); rmrf(newAsar); die(`备份失败：${e.message}`); }
+  
+  // 原子替换：先写到同目录临时文件，再 rename（rename 比 copy 更接近原子操作）
+  const tmpPath = asarPath + '.tmp-' + Date.now();
   try {
-    fs.copyFileSync(asarPath, bakPath);
-    ok(`已备份原版：${path.basename(bakPath)}`);
+    fs.copyFileSync(newAsar, tmpPath);
+    const tmpSize = fs.statSync(tmpPath).size;
+    const newSize = fs.statSync(newAsar).size;
+    if (tmpSize !== newSize) throw new Error(`临时文件大小不匹配 (${tmpSize} vs ${newSize})`);
+    // 尝试原子 rename；如被占用则降级为 copyFileSync
+    try { fs.renameSync(tmpPath, asarPath); ok('已原子替换 app.asar'); }
+    catch (rErr) {
+      if (rErr.code === 'EPERM' || rErr.code === 'EBUSY') {
+        fs.copyFileSync(tmpPath, asarPath);
+        try { fs.unlinkSync(tmpPath); } catch(_) {}
+        ok('已替换 app.asar（copy 降级，因文件被占用）');
+      } else throw rErr;
+    }
   } catch (e) {
+    try { if (exists(tmpPath)) fs.unlinkSync(tmpPath); } catch(_) {}
     rmrf(workDir); rmrf(newAsar);
-    die(`备份失败（app.asar 可能被占用）：${e.message}\n请完全退出 ZCode 后重试。`);
-  }
-  try {
-    fs.copyFileSync(newAsar, asarPath);
-    ok('已替换 app.asar');
-  } catch (e) {
-    rmrf(workDir); rmrf(newAsar);
-    die(`替换失败（app.asar 被占用）：${e.message}\n请完全退出 ZCode 后重试。\n（原文件未被破坏）`);
+    die(`替换失败：${e.message}\n原文件未被破坏。`);
   }
 
   // 清理临时文件

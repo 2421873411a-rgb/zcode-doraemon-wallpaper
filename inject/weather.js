@@ -59,7 +59,17 @@
 
 	        var CONFIG = buildConfig();
 	        var API = 'https://api.open-meteo.com/v1/forecast';
-        var REFRESH_MS = CONFIG.refresh.weatherIntervalMs;
+	        var _intervalId = null;
+	        function getRefreshMs() {
+	          try { return (loadConfig().refreshMin || 20) * 60000; } catch(e) { return 1200000; }
+	        }
+	        function restartSchedule() {
+	          if (_intervalId) clearInterval(_intervalId);
+	          var ms = getRefreshMs();
+	          detect();
+	          _intervalId = setInterval(detect, ms);
+	        }
+	        window.__dwWeatherRestart = restartSchedule; // 供 settings.js 在保存配置后调用
         var FETCH_TIMEOUT_MS = 8000;
 
         // —— 当前坐标（按时间表）——
@@ -157,9 +167,7 @@
         // 等主切换逻辑就绪
         function startWhenReady() {
           if (window.__dwSetWeather) {
-            detect();
-            setInterval(detect, REFRESH_MS);
-            // 休眠唤醒后立即检测
+            restartSchedule();
             document.addEventListener('visibilitychange', function () {
               if (!document.hidden) setTimeout(detect, 2000);
             });

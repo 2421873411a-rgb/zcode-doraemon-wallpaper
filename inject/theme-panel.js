@@ -22,7 +22,20 @@
         }
         function saveUserTheme(t) { return openDB().then(function(db){return new Promise(function(r,j){var tx=db.transaction('themes','readwrite');tx.objectStore('themes').put(t);tx.oncomplete=r;tx.onerror=function(e){j(e.target.error);};});}); }
         function loadUserThemes() { return openDB().then(function(db){return new Promise(function(r,j){var tx=db.transaction('themes','readonly');var req=tx.objectStore('themes').getAll();req.onsuccess=function(){r(req.result||[]);};req.onerror=function(e){j(e.target.error);};});}); }
-        function deleteUserTheme(id) { return openDB().then(function(db){return new Promise(function(r,j){var tx=db.transaction('themes','readwrite');tx.objectStore('themes').delete(id);tx.oncomplete=r;tx.onerror=function(e){j(e.target.error);};});}); }
+	        function deleteUserTheme(id) { return openDB().then(function(db){return new Promise(function(r,j){var tx=db.transaction('themes','readwrite');tx.objectStore('themes').delete(id);tx.oncomplete=r;tx.onerror=function(e){j(e.target.error);};});}); }
+
+	        // —— 安全工具 ——
+	        function escapeHtml(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+	        function validateThemeFields(name, desc) {
+	          // ID: 只允许 a-z 0-9 - _
+	          // name: 最大 60 字符，不含 HTML 标签
+	          // desc: 最大 300 字符
+	          if (!name || typeof name !== 'string') return '主题名不能为空';
+	          if (name.length > 60) return '主题名不能超过 60 个字符';
+	          if (/<[^>]*>/.test(name)) return '主题名不能包含 HTML';
+	          if (desc && desc.length > 300) return '描述不能超过 300 个字符';
+	          return null; // valid
+	        }
 
 		        window.__DW_USER_THEMES__ = window.__DW_USER_THEMES__ || [];
 		        // 把用户主题注册到 __DW_THEMES__ 中，确保 _themes[id] 存在
@@ -132,7 +145,7 @@
             hasThemes = true;
             var isCur = t.id === active;
             var thu = thumbUrl(t.id, t);
-	            html += '<div class="dw-theme-item" data-id="' + t.id + '" data-name="' + t.name.replace(/"/g,'&quot;') + '" data-user="' + (t.user || false) + '" style="' +
+		            html += '<div class="dw-theme-item" data-id="' + escapeHtml(t.id) + '" data-name="' + escapeHtml(t.name) + '" data-user="' + (t.user || false) + '" style="' +
               'padding:6px 10px;margin:3px 0;border-radius:8px;cursor:pointer;' +
               'background:' + (isCur ? 'rgba(126,182,255,0.25)' : 'rgba(255,255,255,0.06)') + ';' +
               'border:1px solid ' + (isCur ? 'rgba(126,182,255,0.6)' : 'transparent') + ';' +
@@ -143,8 +156,8 @@
             else html += '<div style="width:40px;height:28px;border-radius:4px;flex-shrink:0;background:rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;font-size:12px;">🖼</div>';
             // 名称+描述
             html += '<div style="flex:1;min-width:0;">' +
-              '<div class="dw-theme-name" style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (isCur ? '● ' : '○ ') + t.name + '</div>' +
-              '<div style="font-size:11px;opacity:0.6;">' + (t.desc || (t.type==='video'?'🎬 视频':'🖼 图片')) + '</div></div>';
+	              '<div class="dw-theme-name" style="font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + (isCur ? '● ' : '○ ') + escapeHtml(t.name) + '</div>' +
+	              '<div style="font-size:11px;opacity:0.6;">' + escapeHtml(t.desc || (t.type==='video'?'🎬 视频':'🖼 图片')) + '</div></div>';
 	            // 操作按钮
 	            if (t.user) {
 	              html += '<span class="dw-rename-btn" data-id="' + t.id + '" style="font-size:13px;opacity:0.35;cursor:pointer;padding:2px 3px;" title="重命名">✏️</span>' +
@@ -277,9 +290,7 @@
 		            item.onclick = function (e) {
 		              if (e.target.classList.contains('dw-del-btn') || e.target.classList.contains('dw-rename-btn') || e.target.classList.contains('dw-copy-btn')) return;
 		              var id = item.dataset.id;
-		              document.title = '🖱 点击: ' + id;
 		              var result = window.__dwSwitchTheme(id);
-		              document.title = (result === false ? '❌ FAIL' : '✅ OK') + ' → ' + id;
 		              if (result !== false) {
 		                active = id;
 		                buildPanel();
@@ -342,6 +353,8 @@
             var nameInput = document.getElementById('dw-upload-name');
             var name = nameInput ? nameInput.value.trim() : '';
             if (!name) { alert('请输入主题名称'); return; }
+            var verr = validateThemeFields(name, '');
+            if (verr) { alert(verr); return; }
             if (!UPLOAD_MULTI) {
               var fileInput = document.getElementById('dw-upload-file');
               if (!fileInput || !fileInput.files[0]) { alert('请选择文件'); return; }
@@ -355,37 +368,70 @@
             }
           };
 
-	          // —— 导出 .zctheme ——
-	          var exportBtn = document.getElementById('dw-export-btn');
-	          if (exportBtn) exportBtn.onclick = function (e) { e.stopPropagation();
-	            var list = window.__DW_USER_THEMES__ || [];
-	            var data = JSON.stringify({ _formatVersion: 1, _exportedAt: new Date().toISOString(), themes: list });
-	            var a = document.createElement('a');
-	            a.href = 'data:application/json;charset=utf-8,' + encodeURIComponent(data);
-	            a.download = 'zcode-themes-' + new Date().toISOString().slice(0,10) + '.zctheme';
-	            a.click();
-	          };
+		          // —— 导出 .zctheme ——
+		          var exportBtn = document.getElementById('dw-export-btn');
+		          if (exportBtn) exportBtn.onclick = function (e) { e.stopPropagation();
+		            var list = (window.__DW_USER_THEMES__ || []).map(function(t) {
+		              // 深拷贝，避免修改原对象
+		              var copy = {};
+		              for (var k in t) {
+		                if (k === '_userData' && t._userData instanceof ArrayBuffer) {
+		                  // ArrayBuffer → base64 序列化
+		                  var bytes = new Uint8Array(t._userData);
+		                  var bin = '';
+		                  for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+		                  copy._userData = { _encoding: 'base64', _mime: t.fileType === 'video' ? 'video/mp4' : 'image/png', _data: btoa(bin) };
+		                } else if (k === '_userData' && typeof t._userData === 'string' && t._userData.length > 500000) {
+		                  // 大型 data URL 也转为 base64（压缩体积）
+		                  copy._userData = { _encoding: 'base64', _mime: t.fileType === 'video' ? 'video/mp4' : (t._userData.split(';')[0] || 'image/png'), _data: t._userData.split(',')[1] || t._userData };
+		                } else {
+		                  copy[k] = t[k];
+		                }
+		              }
+		              return copy;
+		            });
+		            var data = JSON.stringify({ _formatVersion: 2, _exportedAt: new Date().toISOString(), themes: list });
+		            var a = document.createElement('a');
+		            var blob = new Blob([data], { type: 'application/json' });
+		            a.href = URL.createObjectURL(blob);
+		            a.download = 'zcode-themes-' + new Date().toISOString().slice(0,10) + '.zctheme';
+		            a.click();
+		            setTimeout(function() { URL.revokeObjectURL(a.href); }, 1000);
+		          };
 
-	          // —— 导入 .zctheme / .json ——
-	          var importBtn = document.getElementById('dw-import-btn');
-	          if (importBtn) {
-	            var fileInput = document.createElement('input');
-	            fileInput.type = 'file'; fileInput.accept = '.zctheme,.json';
-	            fileInput.onchange = function (e2) {
-	              var f = e2.target.files[0]; if (!f) return;
-	              var r = new FileReader();
-	              r.onload = function (e3) {
-	                try {
-	                  var parsed = JSON.parse(e3.target.result);
-	                  // 支持新格式 {_formatVersion, themes} 和旧格式 [...]
-	                  var list = Array.isArray(parsed) ? parsed : (parsed.themes || []);
-	                  if (!Array.isArray(list)) { alert('格式错误'); return; }
-	                  Promise.all(list.map(function(t){return saveUserTheme(t);})).then(function(){
-	                    refreshUserThemes(); buildPanel();
-	                    alert('成功导入 ' + list.length + ' 个主题！');
-	                  }).catch(function(err){alert('导入失败:'+err.message);});
-	                } catch(e4){ alert('文件格式错误'); }
-	              };
+		          // —— 导入 .zctheme / .json ——
+		          function decodeImportedTheme(t) {
+		            // v2 格式：将 {_encoding:'base64',_data:'...'} 转回 ArrayBuffer/string
+		            if (t._userData && t._userData._encoding === 'base64' && t._userData._data) {
+		              var bin = atob(t._userData._data);
+		              var bytes = new Uint8Array(bin.length);
+		              for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+		              t._userData = t.fileType === 'video' ? bytes.buffer : ('data:' + (t._userData._mime || 'image/png') + ';base64,' + t._userData._data);
+		            }
+		            // 校验字段
+		            var verr = validateThemeFields(t.name, t.desc);
+		            if (verr) { console.warn('导入主题校验: ' + verr + ' - ' + t.name); }
+		            return t;
+		          }
+		          var importBtn = document.getElementById('dw-import-btn');
+		          if (importBtn) {
+		            var fileInput = document.createElement('input');
+		            fileInput.type = 'file'; fileInput.accept = '.zctheme,.json';
+		            fileInput.onchange = function (e2) {
+		              var f = e2.target.files[0]; if (!f) return;
+		              var r = new FileReader();
+		              r.onload = function (e3) {
+		                try {
+		                  var parsed = JSON.parse(e3.target.result);
+		                  var list = Array.isArray(parsed) ? parsed : (parsed.themes || []);
+		                  if (!Array.isArray(list)) { alert('格式错误'); return; }
+		                  list = list.map(decodeImportedTheme);
+		                  Promise.all(list.map(function(t){return saveUserTheme(t);})).then(function(){
+		                    refreshUserThemes(); buildPanel();
+		                    alert('成功导入 ' + list.length + ' 个主题！');
+		                  }).catch(function(err){alert('导入失败:'+err.message);});
+		                } catch(e4){ alert('文件格式错误'); }
+		              };
 	              r.readAsText(f);
 	            };
 	            importBtn.onclick = function (e) { e.stopPropagation(); fileInput.click(); };
@@ -403,6 +449,7 @@
 	                var parsed = JSON.parse(ev.target.result);
 	                var list = Array.isArray(parsed) ? parsed : (parsed.themes || []);
 	                if (!Array.isArray(list)) { alert('格式错误'); return; }
+	                list = list.map(decodeImportedTheme);
 	                Promise.all(list.map(function(t){return saveUserTheme(t);})).then(function(){
 	                  refreshUserThemes(); buildPanel();
 	                  alert('成功导入 ' + list.length + ' 个主题！');
@@ -515,11 +562,9 @@
 	                periods.forEach(function(p) { if (datas[p]) theme['_data_' + p] = datas[p]; });
 	                // ★ 立即注册到 __DW_THEMES__（不等 IndexedDB）
 	                var target = window.__DW_THEMES__ || {};
-	                target[id] = { id: id, name: name, type: 'static', periods: true, weather: false, assets: assets, desc: theme.desc, _isUser: true };
-	                periods.forEach(function(p) { if (datas[p]) target[id]['_data_' + p] = datas[p]; });
-	                target.__multiData = {};
-	                periods.forEach(function(p) { if (datas[p]) target.__multiData[p] = datas[p]; });
-	                window.__DW_THEMES__ = target;
+		                target[id] = { id: id, name: name, type: 'static', periods: true, weather: false, assets: assets, desc: theme.desc, _isUser: true };
+		                periods.forEach(function(p) { if (datas[p]) target[id]['_data_' + p] = datas[p]; });
+		                window.__DW_THEMES__ = target;
 	                window.__DW_USER_THEMES__ = (window.__DW_USER_THEMES__ || []).concat([theme]);
 	                saveUserTheme(theme).then(function(){ return refreshUserThemes(); }).then(function(){ UPLOAD_MODE = false; UPLOAD_MULTI = false; if (window.__dwSwitchTheme) window.__dwSwitchTheme(id); setTimeout(buildPanel, 200); }).catch(function(err){ alert('保存失败: '+err.message); });
               }
@@ -649,11 +694,8 @@
 	          var period = hour>=5&&hour<8?'morning':hour>=8&&hour<17?'day':hour>=17&&hour<19?'dusk':'night';
 	          var weather = window.__dwGetWeather ? window.__dwGetWeather() : 'clear';
 	          var base = window.__DW_THEMES_BASE__ || './themes/';
-	          if (t._isUser && t.periods) {
-	            var multiData = window.__DW_THEMES__.__multiData;
-	            if (multiData && multiData[period]) return multiData[period];
-	          }
-	          if (t._userData) return t._userData;
+          if (t._isUser && t['_data_' + period]) return t['_data_' + period];
+          if (t._userData) return t._userData;
 	          if (t.assets && t.assets[weather] && t.assets[weather][period])
 	            return base + id + '/' + t.assets[weather][period];
 	          return null;
@@ -696,9 +738,9 @@
 	            previewHtml = '<div style="height:200px;border-radius:10px;overflow:hidden;background:rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:12px;">🖼</div>';
 	          }
 
-	          box.innerHTML = previewHtml +
-	            '<div style="font-size:16px;font-weight:600;margin-bottom:4px;">' + info.name + '</div>' +
-	            '<div style="font-size:12px;opacity:0.6;margin-bottom:14px;">' + (info.desc || (isVideo?'🎬 视频主题':'🖼 图片主题')) + '</div>' +
+          box.innerHTML = previewHtml +
+            '<div style="font-size:16px;font-weight:600;margin-bottom:4px;">' + escapeHtml(info.name) + '</div>' +
+            '<div style="font-size:12px;opacity:0.6;margin-bottom:14px;">' + escapeHtml(info.desc || (isVideo?'🎬 视频主题':'🖼 图片主题')) + '</div>' +
 	            (isActive ? '<div style="text-align:center;padding:6px;border-radius:6px;background:rgba(126,182,255,0.15);font-size:12px;opacity:0.7;">✓ 当前使用中</div>' :
 	            '<div style="display:flex;gap:8px;">' +
 	              '<button class="dw-preview-apply" style="flex:1;padding:8px;border:none;border-radius:8px;background:rgba(74,144,226,0.7);color:#fff;cursor:pointer;font-size:13px;">✓ 应用</button>' +
@@ -728,13 +770,10 @@
 		        if (origSwitch) {
 		          window.__dwSwitchTheme = function (id) {
 		            var userTheme = (window.__DW_USER_THEMES__ || []).find(function (t) { return t.id === id; });
-		            var hasInDW = !!(window.__DW_THEMES__ && window.__DW_THEMES__[id]);
-		            document.title = '🔍 ' + id + ' inDW=' + hasInDW + ' inUser=' + !!userTheme;
 		            if (userTheme && userTheme._isUser) {
 		              // ★ 兜底注册：每一次切换前确保主题在 __DW_THEMES__ 中
 		              var target = window.__DW_THEMES__ || {};
 		              if (!target[id]) {
-		                document.title = '📝 兜底注册: ' + id;
 		                target[id] = {
 		                  id: userTheme.id, name: userTheme.name, type: userTheme.type || 'static',
 		                  periods: userTheme.periods, weather: userTheme.weather,
@@ -750,14 +789,9 @@
 		                window.__dwLastBlobUrl = URL.createObjectURL(new Blob([userTheme._userData], { type: 'video/mp4' }));
 		                target[id]._blobUrl = window.__dwLastBlobUrl;
 		              }
-		              if (userTheme.periods && (userTheme._data_morning || userTheme._data_day || userTheme._data_dusk || userTheme._data_night)) {
-		                target.__multiData = {};
-		                ['morning','day','dusk','night'].forEach(function(p){ var k='_data_'+p; if (userTheme[k]) target.__multiData[p] = userTheme[k]; });
-		              }
 		              window.__DW_THEMES__ = target;
 		            }
 		            var ret = origSwitch(id);
-		            document.title = (ret ? '✅' : '❌') + ' ' + id + ' active=' + (window.__dwGetActiveTheme ? window.__dwGetActiveTheme() : '?');
 		            return ret;
 		          };
 		        }

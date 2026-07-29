@@ -12,6 +12,13 @@
         z-index: -1;
         background: #0b1020;
       }
+      /* 暗色可读性遮罩：始终在壁纸之上提供微弱的暗底，增强白字可读性 */
+      html.zcode-wallpaper-on::after {
+        content: '';
+        position: fixed; inset: 0; z-index: 0;
+        background: rgba(0, 0, 0, 0.18);
+        pointer-events: none;
+      }
       #dw-rain-canvas {
         z-index: 100 !important;
       }
@@ -45,8 +52,8 @@
       html.zcode-wallpaper-on .\[background-color\:var\(--color-background\)\],
       html.zcode-wallpaper-on .bg-\[var\(--color-background\)\],
       html.zcode-wallpaper-on .hover\:bg-background:hover,
-      /* 兜底：所有非交互容器的实色背景一律清空，避免遮挡壁纸 */
-      html.zcode-wallpaper-on body *:not(button):not([role="button"]):not(input):not(textarea):not(select):not(.no-clear-bg) {
+      /* 限制范围：只清除 ZCode 主内容区的背景，保留弹窗/菜单/代码区 */
+      html.zcode-wallpaper-on #root > *:not(button):not([role="button"]):not(input):not(textarea):not(select):not(dialog):not([role="dialog"]):not([role="menu"]):not(code):not(pre):not(.no-clear-bg) {
         background-color: transparent !important;
       }
 

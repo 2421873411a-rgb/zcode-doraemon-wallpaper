@@ -102,12 +102,13 @@
 	              exitProb: parseFloat(document.getElementById('cfg-exitProb').value) || DEFAULTS.exitProb,
 	              refreshMin: parseInt(document.getElementById('cfg-refreshMin').value) || DEFAULTS.refreshMin,
 	            };
-	            saveConfig(cfg);
-	            // 触发立即重新检测
-	            if (window.__dwWeatherAuto && window.__dwWeatherAuto.detect) {
-	              window.__dwWeatherAuto.detect();
-	            }
-	            closeSettings();
+            saveConfig(cfg);
+            // 触发天气服务重新调度（应用新的刷新间隔）并立即检测
+            if (window.__dwWeatherRestart) window.__dwWeatherRestart();
+            else if (window.__dwWeatherAuto && window.__dwWeatherAuto.detect) {
+              window.__dwWeatherAuto.detect();
+            }
+            closeSettings();
 	            // 刷新面板天气显示
 	            var panel = document.getElementById('dw-theme-panel');
 	            if (panel && panel.style.display !== 'none' && typeof buildPanel === 'function') buildPanel();

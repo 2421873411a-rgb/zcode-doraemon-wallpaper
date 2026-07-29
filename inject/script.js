@@ -29,15 +29,12 @@
           if (!themes || !themes[themeId]) return null;
           var t = themes[themeId];
           if (t.type === 'video') return null;
-	          // 多图用户主题：按时段返回不同图
-	          if (t._isUser && t.periods) {
-	            var multiData = themes.__multiData;
-	            if (multiData && multiData[period]) return multiData[period];
-	            // 后备：直接从主题对象中读取（registerUserThemes 时已写入）
-	            if (t['_data_' + period]) return t['_data_' + period];
-	          }
-          // 用户上传主题（存 IndexedDB）：直接返回数据 URL
-          if (t._userData) return t._userData;
+          // 用户主题：优先按时段取 _data_<period>，再取通用 _userData
+          if (t._isUser) {
+            if (t['_data_' + period]) return t['_data_' + period];
+            if (t._userData) return t._userData;
+          }
+          // 内置主题：从 assets 中取路径
           var assets = t.assets && t.assets[weather];
           if (!assets || !assets[period]) return null;
           var base = window.__DW_THEMES_BASE__ || './themes/';

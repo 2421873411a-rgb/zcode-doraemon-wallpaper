@@ -84,19 +84,24 @@ else {
       '壁纸层': '<!-- >>> ZCODE-WALLPAPER-BODY BEGIN',
       '主切换脚本': '<!-- >>> ZCODE-WALLPAPER-SCRIPT BEGIN',
       '手动开关': '<!-- >>> ZCODE-WALLPAPER-SWITCHER BEGIN',
-      '自动天气检测': '<!-- >>> ZCODE-WALLPAPER-WEATHER BEGIN',
+      '天气检测': '<!-- >>> ZCODE-WALLPAPER-WEATHER BEGIN',
+      '主题引擎': '<!-- >>> ZCODE-WALLPAPER-ENGINE BEGIN',
+      '主题面板': '<!-- >>> ZCODE-WALLPAPER-PANEL BEGIN',
+      '下雨动效': '<!-- >>> ZCODE-WALLPAPER-RAIN BEGIN',
+      '天气配置': '<!-- >>> ZCODE-WALLPAPER-SETTINGS BEGIN',
     };
-    let injectCount = 0;
+    let injectCount = 0, totalMarks = Object.keys(marks).length;
     for (const [name, mark] of Object.entries(marks)) {
       if (html.includes(mark)) { ok(`注入: ${name}`); injectCount++; }
       else warn(`未注入: ${name}`);
     }
     let ver = '未知/原始版';
-    if (html.includes('api.open-meteo.com')) ver = 'v3.0 (open-meteo自动检测)';
+    if (html.includes('theme-engine.js') && html.includes('theme-panel.js')) ver = 'v4.5 (外部主题+面板管理)';
+    else if (html.includes('api.open-meteo.com')) ver = 'v3.0 (open-meteo自动检测)';
     else if (html.includes('dw-switch-btn')) ver = 'v2.0 (雨天矩阵+手动开关)';
     else if (html.includes('#doraemon-wallpaper')) ver = 'v1.0 (四时壁纸无框版)';
     console.log(`\n  ${C.bold}${C.green}当前线上版本: ${ver}${C.reset}`);
-    console.log(`  注入完整度: ${injectCount}/5`);
+    console.log(`  注入完整度: ${injectCount}/${totalMarks}`);
     // 壁纸检查：遍历 header 树
     let wpCount = 0;
     function countWp(n, p) {
