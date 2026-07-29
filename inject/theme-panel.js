@@ -74,47 +74,62 @@
         };
 
         // —— 缩略图系统 ——
-        // _thumbCache: id → 小缩略图 data URL（异步生成）
+        // _thumbCache: id → 小缩略图 data URL（异步生成，仅用于用户上传的大 data URL）
+        // 内置/外置静态主题直接用 file:// 路径（短，CSS 直接显示，不经过 canvas 避免跨域污染）
         var _thumbCache = {};
-        var _thumbPending = {}; // 正在生成中的 id
+        var _thumbPending = {};
 
         function thumbUrl(id, t) {
-          // 已有缓存直接用
-          if (_thumbCache[id]) return _thumbCache[id];
-          // 触发异步生成（不阻塞渲染，生成完会刷新面板）
-          genThumbAsync(id, t);
-          return _thumbCache[id] || null;
+          // ===== 用户上传的图片主题：data URL 大，需要 canvas 缩放 =====
+          if (t.user && t.type !== 'video' && t._userData && typeof t._userData === 'string' && t._userData.indexOf('data:') === 0) {
+            if (_thumbCache[id]) return _thumbCache[id];
+            genThumbAsync(id, t);
+            return _thumbCache[id] || null;
+          }
+          // ===== 用户主题自带小缩略图 =====
+          if (t._thumbnail && t._thumbnail.length < 5000) return t._thumbnail;
+          // ===== 内置/外置静态主题：直接返回 file:// 路径（CSS background-image 显示）=====
+          var themes = window.__DW_THEMES__ || {};
+          var theme = themes[id];
+          if (theme && theme.type !== 'video') {
+            var base = window.__DW_THEMES_BASE__ || './themes/';
+            if (theme.assets && theme.assets.clear && theme.assets.clear.morning) {
+              return base + id + '/' + theme.assets.clear.morning;
+            }
+            // add-theme.js 添加的单图主题：assets.clear.morning = 'bg.png'
+            if (theme.assets && theme.assets.clear) {
+              var firstKey = Object.keys(theme.assets.clear)[0];
+              if (firstKey) return base + id + '/' + theme.assets.clear[firstKey];
+            }
+          }
+          // ===== 视频主题：异步截取首帧 =====
+          if (theme && theme.type === 'video') {
+            if (_thumbCache[id]) return _thumbCache[id];
+            genThumbAsync(id, t);
+            return _thumbCache[id] || null;
+          }
+          return null;
         }
 
-        // 异步生成缩略图
+        // 异步生成缩略图（仅用于用户 data URL 图片 + 视频首帧）
         function genThumbAsync(id, t) {
           if (_thumbCache[id] || _thumbPending[id]) return;
           _thumbPending[id] = true;
-
           try {
             var themes = window.__DW_THEMES__ || {};
             var theme = themes[id];
             var base = window.__DW_THEMES_BASE__ || './themes/';
 
-            // ===== 内置静态主题：用 file:// 图片 =====
-            if (theme && theme.type !== 'video' && theme.assets && theme.assets.clear && theme.assets.clear.morning) {
+            // 用户图片主题
+            if (t.user && t.type !== 'video' && t._userData && typeof t._userData === 'string' && t._userData.indexOf('data:') === 0) {
               var img = new Image();
               img.onload = function () { drawThumb(id, img); };
               img.onerror = function () { delete _thumbPending[id]; };
-              img.src = base + id + '/' + theme.assets.clear.morning;
+              img.src = t._userData;
               return;
             }
 
-            // ===== 用户图片主题：用 _userData data URL =====
-            if (t.user && t.type !== 'video' && t._userData && typeof t._userData === 'string' && t._userData.indexOf('data:') === 0) {
-              var img2 = new Image();
-              img2.onload = function () { drawThumb(id, img2); };
-              img2.onerror = function () { delete _thumbPending[id]; };
-              img2.src = t._userData;
-              return;
-            }
-
-            // ===== 视频主题（内置/用户）：截取第一帧 =====
+            // 视频主题（内置/用户）：截取第一帧
             if (theme && theme.type === 'video') {
               var videoSrc = theme._blobUrl;
               if (!videoSrc && theme.asset) videoSrc = base + id + '/' + theme.asset;
@@ -122,12 +137,8 @@
                 var mime = t._userDataMime || 'video/mp4';
                 videoSrc = URL.createObjectURL(new Blob([t._userData], { type: mime }));
               }
-              if (videoSrc) {
-                captureVideoFrame(id, videoSrc);
-                return;
-              }
+              if (videoSrc) { captureVideoFrame(id, videoSrc); return; }
             }
-
             delete _thumbPending[id];
           } catch (e) { delete _thumbPending[id]; }
         }
