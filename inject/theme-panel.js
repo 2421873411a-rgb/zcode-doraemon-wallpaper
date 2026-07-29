@@ -310,15 +310,18 @@
 		          PANEL.querySelectorAll('.dw-theme-item').forEach(function (item) {
 		            item.onmouseenter = function () { if (item.dataset.id !== active) item.style.background = 'rgba(255,255,255,0.12)'; };
 		            item.onmouseleave = function () { if (item.dataset.id !== active) item.style.background = 'rgba(255,255,255,0.06)'; };
-		            item.onclick = function (e) {
-		              if (e.target.classList.contains('dw-del-btn') || e.target.classList.contains('dw-rename-btn') || e.target.classList.contains('dw-copy-btn')) return;
-		              var id = item.dataset.id;
-		              var result = window.__dwSwitchTheme(id);
-		              if (result !== false) {
-		                active = id;
-		                buildPanel();
-		              }
-		            };
+            item.onclick = function (e) {
+              if (e.target.classList.contains('dw-del-btn') || e.target.classList.contains('dw-rename-btn') || e.target.classList.contains('dw-copy-btn')) return;
+              var id = item.dataset.id;
+              var result = window.__dwSwitchTheme(id);
+              if (result !== false) {
+                active = id;
+                buildPanel();
+              } else {
+                // 切换失败：给出可见反馈
+                alert('无法切换到主题「' + (item.getAttribute('data-name') || id) + '」\n\n可能原因：\n1. 主题文件丢失或损坏\n2. 主题数据未加载（尝试点"刷新外置主题"）\n3. 请联系开发者查看控制台日志');
+              }
+            };
 		          });
 
           // —— 删除 ——

@@ -342,13 +342,35 @@ async function main() {
   
   // 构造 file:// URL
   const themesBaseUrl = 'file:///' + themesDir.replace(/\\/g, '/') + '/';
-  // 读取兜底主题元数据（同步后一定存在）
+  // 读取所有外置主题的元数据作为兜底（即使 XHR 被 Electron 拦截也能切换）
   let fallbackThemes = { __default__: 'doraemon' };
   try {
-    const doraTheme = read(path.join(themesDir, 'doraemon', 'theme.json'));
-    const doraJson = JSON.parse(doraTheme);
-    fallbackThemes[doraJson.id] = doraJson;
+    // 从 _registry.json 获取所有已注册主题
+    const regPath = path.join(themesDir, '_registry.json');
+    if (exists(regPath)) {
+      const reg = JSON.parse(read(regPath));
+      const ids = reg.themes || [];
+      for (const id of ids) {
+        try {
+          const themePath = path.join(themesDir, id, 'theme.json');
+          if (exists(themePath)) {
+            const themeJson = JSON.parse(read(themePath));
+            fallbackThemes[themeJson.id] = themeJson;
+          }
+        } catch (e) { /* 单个主题加载失败不阻断整体 */ }
+      }
+      if (!fallbackThemes.__default__ || !fallbackThemes[fallbackThemes.__default__]) {
+        fallbackThemes.__default__ = reg.default || ids[0] || 'doraemon';
+      }
+    }
   } catch (e) { warn('兜底主题读取失败，使用最小配置'); }
+  // 确保至少 doraemon 存在
+  if (!fallbackThemes.doraemon) {
+    try {
+      const doraTheme = read(path.join(themesDir, 'doraemon', 'theme.json'));
+      fallbackThemes[JSON.parse(doraTheme).id] = JSON.parse(doraTheme);
+    } catch (e2) { /* 忽略 */ }
+  }
   // 替换 engineTpl 中的占位符
   if (engineTpl) {
     engineTpl = engineTpl.replace('__BASE_TOKEN__', JSON.stringify(themesBaseUrl));
