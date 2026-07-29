@@ -74,15 +74,50 @@
         };
 
         // —— 缩略图 ——
+        // _thumbCache: id → 小缩略图 data URL（异步生成，避免大 data URL 嵌入 HTML）
+        var _thumbCache = {};
         function thumbUrl(id, t) {
           if (t.type === 'video') return null;
-          if (t._thumbnail) return t._thumbnail;
-          if (t.user && t._userData) return t._userData;
-          var themes = window.__DW_THEMES__ || {};
-          var base = window.__DW_THEMES_BASE__ || './themes/';
-          var th = themes[id];
-          if (th && th.assets && th.assets.clear && th.assets.clear.morning) return base + id + '/' + th.assets.clear.morning;
+          // 优先用已缓存的小缩略图
+          if (_thumbCache[id]) return _thumbCache[id];
+          // 主题自带缩略图（小）
+          if (t._thumbnail && t._thumbnail.length < 5000) return t._thumbnail;
+          // 内置主题用 file:// 路径（短，安全）
+          if (!t.user) {
+            var themes = window.__DW_THEMES__ || {};
+            var base = window.__DW_THEMES_BASE__ || './themes/';
+            var th = themes[id];
+            if (th && th.assets && th.assets.clear && th.assets.clear.morning) return base + id + '/' + th.assets.clear.morning;
+          }
+          // 用户主题的大 data URL 不直接用（会撑爆 HTML），异步生成缩略图
+          if (t.user && t._userData && typeof t._userData === 'string' && t._userData.indexOf('data:') === 0) {
+            genThumbAsync(id, t._userData);
+          }
           return null;
+        }
+
+        // 异步生成缩略图：data URL → canvas 缩放 → 小 data URL
+        function genThumbAsync(id, dataUrl) {
+          if (_thumbCache[id]) return; // 已生成
+          try {
+            var img = new Image();
+            img.onload = function () {
+              try {
+                var c = document.createElement('canvas');
+                c.width = 48; c.height = 32;
+                var cx = c.getContext('2d');
+                // 居中裁剪缩放
+                var s = Math.min(img.width / 48, img.height / 32);
+                var sw = 48 * s, sh = 32 * s;
+                cx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, 48, 32);
+                _thumbCache[id] = c.toDataURL('image/jpeg', 0.6);
+                // 缩略图生成后刷新面板（如果面板开着）
+                if (PANEL && PANEL.style.display === 'block') buildPanel();
+              } catch (e) { /* 跨域或解码失败，忽略 */ }
+            };
+            img.onerror = function () { /* 解码失败，忽略 */ };
+            img.src = dataUrl;
+          } catch (e) { }
         }
 
         // —— 主面板渲染 ——
@@ -114,16 +149,31 @@
               try {
               var isCur = t.id === active;
               var thu = thumbUrl(t.id, t);
-              // 缩略图过长（data URL）时不嵌入 HTML，避免字符串过大
-              var thuSafe = (thu && thu.length < 5000) ? thu : null;
               html += '<div class="dw-item" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '" style="' +
                 'padding:5px 8px;margin:2px 0;border-radius:7px;cursor:pointer;' +
                 'background:' + (isCur ? 'rgba(126,182,255,0.25)' : 'rgba(255,255,255,0.06)') + ';' +
                 'border:1px solid ' + (isCur ? 'rgba(126,182,255,0.6)' : 'transparent') + ';' +
                 'display:flex;align-items:center;gap:8px;">';
-              if (thuSafe) html += '<div style="width:36px;height:24px;border-radius:3px;flex-shrink:0;background-size:cover;background-position:center;background-image:url(\'' + thuSafe.replace(/'/g, "\\'") + '\');"></div>';
-              else html += '<span style="font-size:16px;width:36px;text-align:center;">' + (t.type === 'video' ? '🎬' : '🖼') + '</span>';
+              // 缩略图（48×32 圆角）
+              if (thu) {
+                html += '<div style="width:48px;height:32px;border-radius:4px;flex-shrink:0;background-size:cover;background-position:center;background-image:url(\'' + thu.replace(/'/g, "\\'") + '\');"></div>';
+              } else if (t.type === 'video') {
+                // 视频主题：尝试从内置主题取第一帧缩略图，否则用图标
+                var vThumb = null;
+                var themes = window.__DW_THEMES__ || {};
+                var th = themes[t.id];
+                if (th && th.asset) {
+                  var base = window.__DW_THEMES_BASE__ || './themes/';
+                  // 视频无法直接做缩略图，用渐变背景 + 图标
+                  vThumb = base + t.id + '/' + th.asset;
+                }
+                html += '<div style="width:48px;height:32px;border-radius:4px;flex-shrink:0;background:linear-gradient(135deg,#1a1a2e,#16213e);display:flex;align-items:center;justify-content:center;font-size:16px;">🎬</div>';
+              } else {
+                html += '<div style="width:48px;height:32px;border-radius:4px;flex-shrink:0;background:rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;font-size:14px;">🖼</div>';
+              }
               html += '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">' + (isCur ? '● ' : '○ ') + esc(t.name) + '</span>';
+              // 类型标签
+              html += '<span style="font-size:9px;opacity:0.4;padding:1px 4px;border-radius:3px;background:rgba(255,255,255,0.08);">' + (t.type === 'video' ? '视频' : '图片') + '</span>';
               // 操作按钮
               if (t.user) {
                 html += '<span class="dw-rename-btn" data-id="' + esc(t.id) + '" style="cursor:pointer;opacity:0.35;padding:2px;" title="重命名">✏️</span>' +
@@ -399,6 +449,8 @@
             
             // 立即切换（不等 DB）
             UPLOAD_MODE = false;
+            // 图片主题预生成缩略图缓存
+            if (!isVideo && typeof data === 'string' && data.indexOf('data:') === 0) genThumbAsync(id, data);
             if (window.__dwSwitchTheme) window.__dwSwitchTheme(id);
             setTimeout(buildPanel, 300);
             
