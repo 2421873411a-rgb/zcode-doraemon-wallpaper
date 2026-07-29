@@ -2,6 +2,15 @@
       // ============ 主题面板 v6.1（完整版 + 容错）============
       // 每个功能模块独立 try/catch，一个崩不影响整体
       (function () {
+        // ★ 可见标记
+        try {
+          var _ok = document.createElement('div');
+          _ok.id = 'dw-panel-ok';
+          _ok.style.cssText = 'position:fixed;top:0;right:0;z-index:2147483645;padding:1px 5px;background:#0a0;color:#fff;font-size:9px;opacity:0.6;pointer-events:none;border-radius:0 0 0 4px;';
+          _ok.textContent = 'PANEL v6.1';
+          document.body.appendChild(_ok);
+        } catch(_) {}
+
         var PANEL = null, UPLOAD_MODE = false, UPLOAD_MULTI = false;
         var _searchQuery = '', _showSettings = false;
 
@@ -80,6 +89,10 @@
         function buildPanel() {
           try {
             if (!PANEL || !document.body.contains(PANEL)) return;
+            if (typeof window.__dwListAllThemes !== 'function') {
+              PANEL.innerHTML = '<div style="text-align:center;padding:20px;color:#f66;">⚠ __dwListAllThemes 未定义<br><span style="font-size:10px;opacity:0.5;">主题引擎可能加载失败</span></div>';
+              return;
+            }
             var all = window.__dwListAllThemes();
             var active = window.__dwGetActiveTheme ? window.__dwGetActiveTheme() : '';
             var w = window.__dwGetWeather ? window.__dwGetWeather() : 'clear';
@@ -333,28 +346,44 @@
           if (file.size > limit) { toast('文件过大（最大' + (isVideo ? '200MB' : '20MB') + '）'); return; }
           var id = 'user-' + Date.now();
           var reader = new FileReader();
+          reader.onerror = function () { toast('文件读取失败'); };
           reader.onload = function (e) {
+            try {
             var data = e.target.result;
             var theme = { id: id, name: name, type: isVideo ? 'video' : 'static', periods: false, weather: false, desc: (isVideo ? '🎬 ' : '🖼 ') + name, fileType: isVideo ? 'video' : 'image', asset: isVideo ? 'bg.mp4' : 'bg.png', _userData: data, _isUser: true };
             if (isVideo) theme._userDataMime = file.type || 'video/mp4';
             if (!isVideo) theme.assets = { clear: { morning: 'bg.png', day: 'bg.png', dusk: 'bg.png', night: 'bg.png' }, rain: { morning: 'bg.png', day: 'bg.png', dusk: 'bg.png', night: 'bg.png' } };
-            // 立即注册
-            var tgt = window.__DW_THEMES__ || {};
-            tgt[id] = { id: id, name: name, type: theme.type, asset: theme.asset, assets: theme.assets, desc: theme.desc, _userData: data, _isUser: true };
-            if (isVideo) tgt[id]._userDataMime = theme._userDataMime;
-            window.__DW_THEMES__ = tgt;
-            window.__DW_USER_THEMES__ = (window.__DW_USER_THEMES__ || []).concat([theme]);
+            
+            // ★ 先保存到内存（不等 DB），确保立即可切换
+            var memEntry = { id: id, name: name, type: theme.type, asset: theme.asset, assets: theme.assets, desc: theme.desc, _userData: data, _isUser: true };
+            if (isVideo) memEntry._userDataMime = theme._userDataMime;
+            // 复制所有 _data_* 字段
+            for (var k in theme) { if (/^_data_/.test(k)) memEntry[k] = theme[k]; }
+            
+            var dwThemes = window.__DW_THEMES__ || {};
+            dwThemes[id] = memEntry;
+            window.__DW_THEMES__ = dwThemes;
+            
+            // 更新用户列表
+            var userList = (window.__DW_USER_THEMES__ || []).filter(function(t){return t.id !== id;});
+            userList.push(theme);
+            window.__DW_USER_THEMES__ = userList;
+            
+            // 后台保存（异步，不阻塞切换）
             if (window._dwSaveUserTheme) {
-              window._dwSaveUserTheme(theme).then(function () { return refreshUserThemes(); }).then(function () {
-                UPLOAD_MODE = false;
-                if (window.__dwSwitchTheme) window.__dwSwitchTheme(id);
-                setTimeout(buildPanel, 200);
-              }).catch(function (err) { toast('保存失败: ' + err.message); });
-            } else {
-              UPLOAD_MODE = false;
-              if (window.__dwSwitchTheme) window.__dwSwitchTheme(id);
-              setTimeout(buildPanel, 200);
+              window._dwSaveUserTheme(theme).then(function () {
+                return window._dwLoadUserThemes ? window._dwLoadUserThemes() : Promise.resolve(userList);
+              }).then(function (dbList) {
+                window.__DW_USER_THEMES__ = dbList;
+              }).catch(function () { /* DB 保存失败不影响使用 */ });
             }
+            
+            // 立即切换（不等 DB）
+            UPLOAD_MODE = false;
+            if (window.__dwSwitchTheme) window.__dwSwitchTheme(id);
+            setTimeout(buildPanel, 300);
+            
+            } catch (err) { toast('处理失败: ' + (err.message || err)); }
           };
           if (isVideo) reader.readAsArrayBuffer(file); else reader.readAsDataURL(file);
         }
@@ -385,18 +414,30 @@
                 });
                 var theme = { id: id, name: name, type: 'static', periods: true, weather: false, desc: '🖼 ' + name + '（四时段）', fileType: 'image', assets: assets, _isUser: true };
                 periods.forEach(function (p) { if (datas[p]) theme['_data_' + p] = datas[p]; });
-                var tgt = window.__DW_THEMES__ || {};
-                tgt[id] = { id: id, name: name, type: 'static', assets: assets, desc: theme.desc, _isUser: true };
-                periods.forEach(function (p) { if (datas[p]) tgt[id]['_data_' + p] = datas[p]; });
-                window.__DW_THEMES__ = tgt;
-                window.__DW_USER_THEMES__ = (window.__DW_USER_THEMES__ || []).concat([theme]);
+                
+                // 先注册到内存
+                var memEntry = { id: id, name: name, type: 'static', assets: assets, desc: theme.desc, _isUser: true };
+                for (var k in theme) { if (/^_data_/.test(k)) memEntry[k] = theme[k]; }
+                var dwThemes = window.__DW_THEMES__ || {};
+                dwThemes[id] = memEntry;
+                window.__DW_THEMES__ = dwThemes;
+                var userList = (window.__DW_USER_THEMES__ || []).filter(function(t){return t.id !== id;});
+                userList.push(theme);
+                window.__DW_USER_THEMES__ = userList;
+                
+                // 后台保存
                 if (window._dwSaveUserTheme) {
-                  window._dwSaveUserTheme(theme).then(function () { return refreshUserThemes(); }).then(function () {
-                    UPLOAD_MODE = false; UPLOAD_MULTI = false;
-                    if (window.__dwSwitchTheme) window.__dwSwitchTheme(id);
-                    setTimeout(buildPanel, 200);
-                  }).catch(function (err) { toast('保存失败: ' + err.message); });
+                  window._dwSaveUserTheme(theme).then(function () {
+                    return window._dwLoadUserThemes ? window._dwLoadUserThemes() : Promise.resolve(userList);
+                  }).then(function (dbList) {
+                    window.__DW_USER_THEMES__ = dbList;
+                  }).catch(function () {});
                 }
+                
+                // 立即切换
+                UPLOAD_MODE = false; UPLOAD_MULTI = false;
+                if (window.__dwSwitchTheme) window.__dwSwitchTheme(id);
+                setTimeout(buildPanel, 300);
               }
             };
             r.readAsDataURL(file);
