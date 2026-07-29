@@ -68,56 +68,119 @@
           var builtin = window.__dwListThemes ? window.__dwListThemes() : [];
           builtin.forEach(function (t) { map[t.id] = t; });
           (window.__DW_USER_THEMES__ || []).forEach(function (t) {
-            map[t.id] = { id: t.id, name: t.name, type: t.type, desc: t.desc || '自定义', user: true };
+            map[t.id] = { id: t.id, name: t.name, type: t.type, desc: t.desc || '自定义', user: true, _userData: t._userData, _userDataMime: t._userDataMime, _thumbnail: t._thumbnail };
           });
           var r = []; for (var k in map) r.push(map[k]); return r;
         };
 
-        // —— 缩略图 ——
-        // _thumbCache: id → 小缩略图 data URL（异步生成，避免大 data URL 嵌入 HTML）
+        // —— 缩略图系统 ——
+        // _thumbCache: id → 小缩略图 data URL（异步生成）
         var _thumbCache = {};
+        var _thumbPending = {}; // 正在生成中的 id
+
         function thumbUrl(id, t) {
-          if (t.type === 'video') return null;
-          // 优先用已缓存的小缩略图
+          // 已有缓存直接用
           if (_thumbCache[id]) return _thumbCache[id];
-          // 主题自带缩略图（小）
-          if (t._thumbnail && t._thumbnail.length < 5000) return t._thumbnail;
-          // 内置主题用 file:// 路径（短，安全）
-          if (!t.user) {
-            var themes = window.__DW_THEMES__ || {};
-            var base = window.__DW_THEMES_BASE__ || './themes/';
-            var th = themes[id];
-            if (th && th.assets && th.assets.clear && th.assets.clear.morning) return base + id + '/' + th.assets.clear.morning;
-          }
-          // 用户主题的大 data URL 不直接用（会撑爆 HTML），异步生成缩略图
-          if (t.user && t._userData && typeof t._userData === 'string' && t._userData.indexOf('data:') === 0) {
-            genThumbAsync(id, t._userData);
-          }
-          return null;
+          // 触发异步生成（不阻塞渲染，生成完会刷新面板）
+          genThumbAsync(id, t);
+          return _thumbCache[id] || null;
         }
 
-        // 异步生成缩略图：data URL → canvas 缩放 → 小 data URL
-        function genThumbAsync(id, dataUrl) {
-          if (_thumbCache[id]) return; // 已生成
+        // 异步生成缩略图
+        function genThumbAsync(id, t) {
+          if (_thumbCache[id] || _thumbPending[id]) return;
+          _thumbPending[id] = true;
+
           try {
-            var img = new Image();
-            img.onload = function () {
+            var themes = window.__DW_THEMES__ || {};
+            var theme = themes[id];
+            var base = window.__DW_THEMES_BASE__ || './themes/';
+
+            // ===== 内置静态主题：用 file:// 图片 =====
+            if (theme && theme.type !== 'video' && theme.assets && theme.assets.clear && theme.assets.clear.morning) {
+              var img = new Image();
+              img.onload = function () { drawThumb(id, img); };
+              img.onerror = function () { delete _thumbPending[id]; };
+              img.src = base + id + '/' + theme.assets.clear.morning;
+              return;
+            }
+
+            // ===== 用户图片主题：用 _userData data URL =====
+            if (t.user && t.type !== 'video' && t._userData && typeof t._userData === 'string' && t._userData.indexOf('data:') === 0) {
+              var img2 = new Image();
+              img2.onload = function () { drawThumb(id, img2); };
+              img2.onerror = function () { delete _thumbPending[id]; };
+              img2.src = t._userData;
+              return;
+            }
+
+            // ===== 视频主题（内置/用户）：截取第一帧 =====
+            if (theme && theme.type === 'video') {
+              var videoSrc = theme._blobUrl;
+              if (!videoSrc && theme.asset) videoSrc = base + id + '/' + theme.asset;
+              if (t.user && t._userData instanceof ArrayBuffer) {
+                var mime = t._userDataMime || 'video/mp4';
+                videoSrc = URL.createObjectURL(new Blob([t._userData], { type: mime }));
+              }
+              if (videoSrc) {
+                captureVideoFrame(id, videoSrc);
+                return;
+              }
+            }
+
+            delete _thumbPending[id];
+          } catch (e) { delete _thumbPending[id]; }
+        }
+
+        // 通用：把 Image 画成缩略图
+        function drawThumb(id, img) {
+          try {
+            var c = document.createElement('canvas');
+            c.width = 64; c.height = 40;
+            var cx = c.getContext('2d');
+            var s = Math.min(img.width / 64, img.height / 40);
+            var sw = 64 * s, sh = 40 * s;
+            cx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, 64, 40);
+            _thumbCache[id] = c.toDataURL('image/jpeg', 0.7);
+          } catch (e) { }
+          delete _thumbPending[id];
+          if (PANEL && PANEL.style.display === 'block') buildPanel();
+        }
+
+        // 视频截取第一帧
+        function captureVideoFrame(id, src) {
+          try {
+            var v = document.createElement('video');
+            v.muted = true; v.preload = 'metadata';
+            v.src = src;
+            var done = false;
+            // 加载到数据后 seek 到 0.1 秒截图
+            v.onloadeddata = function () {
+              if (done) return;
+              try {
+                v.currentTime = Math.min(0.5, (v.duration || 1) * 0.1);
+              } catch (e) { finishCapture(); }
+            };
+            v.onseeked = function () { if (!done) finishCapture(); };
+            v.onerror = function () { delete _thumbPending[id]; };
+            function finishCapture() {
+              done = true;
               try {
                 var c = document.createElement('canvas');
-                c.width = 48; c.height = 32;
+                c.width = 64; c.height = 40;
                 var cx = c.getContext('2d');
-                // 居中裁剪缩放
-                var s = Math.min(img.width / 48, img.height / 32);
-                var sw = 48 * s, sh = 32 * s;
-                cx.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, 0, 0, 48, 32);
-                _thumbCache[id] = c.toDataURL('image/jpeg', 0.6);
-                // 缩略图生成后刷新面板（如果面板开着）
-                if (PANEL && PANEL.style.display === 'block') buildPanel();
-              } catch (e) { /* 跨域或解码失败，忽略 */ }
-            };
-            img.onerror = function () { /* 解码失败，忽略 */ };
-            img.src = dataUrl;
-          } catch (e) { }
+                var vw = v.videoWidth || 640, vh = v.videoHeight || 360;
+                var s = Math.min(vw / 64, vh / 40);
+                var sw = 64 * s, sh = 40 * s;
+                cx.drawImage(v, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, 64, 40);
+                _thumbCache[id] = c.toDataURL('image/jpeg', 0.7);
+              } catch (e) { }
+              delete _thumbPending[id];
+              if (PANEL && PANEL.style.display === 'block') buildPanel();
+            }
+            // 超时保护：5 秒没成功就放弃
+            setTimeout(function () { if (!done) { done = true; delete _thumbPending[id]; } }, 5000);
+          } catch (e) { delete _thumbPending[id]; }
         }
 
         // —— 主面板渲染 ——
@@ -154,22 +217,13 @@
                 'background:' + (isCur ? 'rgba(126,182,255,0.25)' : 'rgba(255,255,255,0.06)') + ';' +
                 'border:1px solid ' + (isCur ? 'rgba(126,182,255,0.6)' : 'transparent') + ';' +
                 'display:flex;align-items:center;gap:8px;">';
-              // 缩略图（48×32 圆角）
+              // 缩略图（64×40 圆角）
               if (thu) {
-                html += '<div style="width:48px;height:32px;border-radius:4px;flex-shrink:0;background-size:cover;background-position:center;background-image:url(\'' + thu.replace(/'/g, "\\'") + '\');"></div>';
-              } else if (t.type === 'video') {
-                // 视频主题：尝试从内置主题取第一帧缩略图，否则用图标
-                var vThumb = null;
-                var themes = window.__DW_THEMES__ || {};
-                var th = themes[t.id];
-                if (th && th.asset) {
-                  var base = window.__DW_THEMES_BASE__ || './themes/';
-                  // 视频无法直接做缩略图，用渐变背景 + 图标
-                  vThumb = base + t.id + '/' + th.asset;
-                }
-                html += '<div style="width:48px;height:32px;border-radius:4px;flex-shrink:0;background:linear-gradient(135deg,#1a1a2e,#16213e);display:flex;align-items:center;justify-content:center;font-size:16px;">🎬</div>';
+                html += '<div style="width:64px;height:40px;border-radius:4px;flex-shrink:0;background-size:cover;background-position:center;background-image:url(\'' + thu.replace(/'/g, "\\'") + '\');"></div>';
               } else {
-                html += '<div style="width:48px;height:32px;border-radius:4px;flex-shrink:0;background:rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;font-size:14px;">🖼</div>';
+                // 缩略图还在生成中，显示占位
+                var placeholder = t.type === 'video' ? '🎬' : '🖼';
+                html += '<div style="width:64px;height:40px;border-radius:4px;flex-shrink:0;background:rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;font-size:18px;">' + placeholder + '</div>';
               }
               html += '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">' + (isCur ? '● ' : '○ ') + esc(t.name) + '</span>';
               // 类型标签
