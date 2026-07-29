@@ -9,26 +9,38 @@
         var STORAGE_KEY = 'dw-active-theme';
         var _themes = null; // 当前加载的主题清单
 
+        // P0-4: 本地文件读取 — 接受 status 0（file:// 成功）和 2xx
+        function loadLocalText(url) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', url, false);
+          xhr.send(null);
+          var httpOk = xhr.status >= 200 && xhr.status < 300;
+          var localOk = xhr.status === 0 && typeof xhr.responseText === 'string' && xhr.responseText.trim().length > 0;
+          if (!httpOk && !localOk) {
+            throw new Error('读取文件失败 ' + url + ' (status=' + xhr.status + ')');
+          }
+          return xhr.responseText;
+        }
+
         // 同步加载主题清单：从外部目录读 _registry.json + 各 theme.json
         function loadThemes() {
           if (!BASE) return FALLBACK;
           try {
-            var req = new XMLHttpRequest();
-            req.open('GET', BASE + '_registry.json', false);
-            req.send();
-            if (req.status < 200 || req.status >= 300) return FALLBACK;
-            var reg = JSON.parse(req.responseText);
+            var reg = JSON.parse(loadLocalText(BASE + '_registry.json'));
             var out = { __default__: reg.default || 'doraemon' };
             for (var i = 0; i < reg.themes.length; i++) {
               var id = reg.themes[i];
-              req.open('GET', BASE + id + '/theme.json', false);
-              req.send();
-              if (req.status >= 200 && req.status < 300) {
-                out[id] = JSON.parse(req.responseText);
+              try {
+                out[id] = JSON.parse(loadLocalText(BASE + id + '/theme.json'));
+              } catch (e2) {
+                // P0-5: 单个 theme.json 失败时输出警告，不静默跳过
+                console.warn('[DW] 主题「' + id + '」加载失败: ' + (e2 && e2.message ? e2.message : e2));
               }
             }
             return out;
           } catch (e) {
+            // P0-5: 整体加载失败时输出错误详情
+            console.warn('[DW] 主题清单加载失败: ' + (e && e.message ? e.message : e) + '，回退到内置数据');
             return FALLBACK;
           }
         }

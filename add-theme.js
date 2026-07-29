@@ -38,7 +38,24 @@ function generateId(name) {
   return name.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fff]+/g, '-').replace(/^-|-$/g, '') || 'theme-' + Date.now();
 }
 
+// P0-1: 类型归一化 — image/static 统一为 static
+function normalizeThemeType(rawType) {
+  var type = String(rawType || '').trim().toLowerCase();
+  if (type === 'image' || type === 'static') return 'static';
+  if (type === 'video') return 'video';
+  throw new Error('主题类型只能是 image、static 或 video');
+}
+
+// P0-2: 生成完整晴雨四时段资源矩阵
+function createStaticAssets(assetName) {
+  var periods = { morning: assetName, day: assetName, dusk: assetName, night: assetName };
+  return { clear: JSON.parse(JSON.stringify(periods)), rain: JSON.parse(JSON.stringify(periods)) };
+}
+
 function addTheme(id, name, type, assetFile, desc) {
+  // P0-1: 类型归一化
+  try { type = normalizeThemeType(type); }
+  catch (e) { console.error(C.red + '✗ ' + e.message + C.reset); return; }
   // 建主题目录
   const themeDir = path.join(THEMES_DIR, id);
   if (fs.existsSync(themeDir)) { warn(`主题「${id}」已存在，覆盖`); }
@@ -54,15 +71,17 @@ function addTheme(id, name, type, assetFile, desc) {
   fs.copyFileSync(assetFile, destFile);
 
   // 写 theme.json
-  const themeJson = {
-    id, name, type,
-    periods: type === 'static',
-    weather: type === 'static',
-    [type === 'video' ? 'asset' : 'assets']: type === 'video' ? assetName : { clear: { default: assetName }, rain: { default: assetName } },
-    desc: desc || `${name} - ${type === 'video' ? '视频' : '静态'}壁纸`,
+  var themeJson = {
+    id: id, name: name, type: type,
+    periods: false,   // 单图主题无时段变化
+    weather: false,   // 单图主题无天气变化
+    desc: desc || (name + ' - ' + (type === 'video' ? '视频' : '静态') + '壁纸'),
   };
-  if (type === 'static') {
-    themeJson.assets = { clear: { morning: assetName, day: assetName, dusk: assetName, night: assetName } };
+  if (type === 'video') {
+    themeJson.asset = assetName;
+  } else {
+    // P0-2: 生成完整晴雨四时段矩阵，确保任何天气/时段都能解析到资源
+    themeJson.assets = createStaticAssets(assetName);
   }
   fs.writeFileSync(path.join(themeDir, 'theme.json'), JSON.stringify(themeJson, null, 2));
 
@@ -74,9 +93,36 @@ function addTheme(id, name, type, assetFile, desc) {
   if (!reg.default) reg.default = id;
   fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
 
-  ok(`主题「${name}」已添加！重启 ZCode 即可看到`);
-  info(`主题路径: ${themeDir}`);
-  info(`配置文件: themes/_registry.json`);
+  // P0-7: 自动验证写入结果
+  var errors = [];
+  // 1) 验证 _registry.json
+  try {
+    var regCheck = JSON.parse(fs.readFileSync(regPath, 'utf8'));
+    if (!regCheck.themes || !regCheck.themes.includes(id))
+      errors.push('_registry.json 中未找到主题 ID「' + id + '」');
+  } catch (e) { errors.push('_registry.json 解析失败: ' + e.message); }
+  // 2) 验证 theme.json
+  try {
+    var themeCheck = JSON.parse(fs.readFileSync(path.join(themeDir, 'theme.json'), 'utf8'));
+    if (!themeCheck.id || !themeCheck.name || !themeCheck.type)
+      errors.push('theme.json 缺少必要字段 (id/name/type)');
+    if (themeCheck.type === 'static' && (!themeCheck.assets || !themeCheck.assets.clear))
+      errors.push('静态主题缺少 assets.clear');
+    if (themeCheck.type === 'video' && !themeCheck.asset)
+      errors.push('视频主题缺少 asset 字段');
+  } catch (e) { errors.push('theme.json 解析失败: ' + e.message); }
+  // 3) 验证资源文件存在
+  if (!fs.existsSync(destFile))
+    errors.push('资源文件缺失: ' + destFile);
+
+  if (errors.length > 0) {
+    console.error(C.red + '✗ 验证失败！' + C.reset);
+    errors.forEach(function (e) { console.error('  ' + C.red + '! ' + e + C.reset); });
+  } else {
+    ok('主题「' + name + '」已添加并验证通过！重启 ZCode 即可看到');
+  }
+  info('主题路径: ' + themeDir);
+  info('配置文件: themes/_registry.json');
 }
 
 // 交互式

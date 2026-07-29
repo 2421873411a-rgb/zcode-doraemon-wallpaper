@@ -12,13 +12,6 @@
         z-index: -1;
         background: #0b1020;
       }
-      /* 暗色可读性遮罩：始终在壁纸之上提供微弱的暗底，增强白字可读性 */
-      html.zcode-wallpaper-on::after {
-        content: '';
-        position: fixed; inset: 0; z-index: 0;
-        background: rgba(0, 0, 0, 0.18);
-        pointer-events: none;
-      }
       #dw-rain-canvas {
         z-index: 100 !important;
       }
@@ -46,15 +39,33 @@
       html.zcode-wallpaper-on #root {
         background: transparent !important;
       }
+      /* 全部透明：壁纸透出 */
       html.zcode-wallpaper-on .bg-background,
       html.zcode-wallpaper-on .bg-background-alt,
       html.zcode-wallpaper-on .bg-background-win-alt,
       html.zcode-wallpaper-on .\[background-color\:var\(--color-background\)\],
       html.zcode-wallpaper-on .bg-\[var\(--color-background\)\],
       html.zcode-wallpaper-on .hover\:bg-background:hover,
-      /* 限制范围：只清除 ZCode 主内容区的背景，保留弹窗/菜单/代码区 */
-      html.zcode-wallpaper-on #root > *:not(button):not([role="button"]):not(input):not(textarea):not(select):not(dialog):not([role="dialog"]):not([role="menu"]):not(code):not(pre):not(.no-clear-bg) {
+      html.zcode-wallpaper-on body *:not(button):not([role="button"]):not(input):not(textarea):not(select):not(.no-clear-bg) {
         background-color: transparent !important;
+      }
+      /* 对话栏（输入区容器）保留半透明黑底，方便打字阅读 */
+      html.zcode-wallpaper-on .\@container\/composer,
+      html.zcode-wallpaper-on [class*="composer"]:not(button):not([role="button"]):not(input):not(textarea):not(select),
+      html.zcode-wallpaper-on [class*="chat-input"]:not(button):not([role="button"]):not(input):not(textarea):not(select) {
+        background-color: var(--dw-input-bg) !important;
+        backdrop-filter: blur(8px);
+      }
+      /* 输入框本身保留半透明黑底 */
+      html.zcode-wallpaper-on input,
+      html.zcode-wallpaper-on textarea,
+      html.zcode-wallpaper-on select {
+        background-color: var(--dw-input-bg) !important;
+        color: var(--dw-input-text) !important;
+      }
+      html.zcode-wallpaper-on input::placeholder,
+      html.zcode-wallpaper-on textarea::placeholder {
+        color: var(--dw-text-soft) !important;
       }
 
       /* ============ 文字描边方案 ============ */
@@ -73,14 +84,7 @@
         --dw-icon-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
       }
 
-      /* input/textarea/select 用半透明底 */
-      html.zcode-wallpaper-on input,
-      html.zcode-wallpaper-on textarea,
-      html.zcode-wallpaper-on select {
-        background-color: var(--dw-input-bg) !important;
-        color: var(--dw-input-text) !important;
-        backdrop-filter: blur(4px);
-      }
+      /* 保持输入框原生背景，只改文字颜色 */
       html.zcode-wallpaper-on input::placeholder,
       html.zcode-wallpaper-on textarea::placeholder {
         color: var(--dw-text-soft) !important;

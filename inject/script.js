@@ -24,6 +24,28 @@
         function setWeatherSource(w, s) { setWeather(w); try { localStorage.setItem('dw-weather-source', s); } catch (e) {} }
 
         // —— 主题资源路径 ——
+
+        // P0-3: 统一资源解析（天气回退 + 时段回退 + 尊重 weather/periods 声明）
+        function resolveThemeAsset(theme, weather, period) {
+          if (!theme || theme.type === 'video') return null;
+          var assets = theme.assets || {};
+          // 尊重 weather 声明：不区分天气时始终用 clear
+          var effectiveWeather = (theme.weather === false) ? 'clear' : weather;
+          // 天气回退链：指定天气 → clear → rain → 第一个可用
+          var group = assets[effectiveWeather] || assets.clear || assets.rain;
+          if (!group) {
+            var keys = Object.keys(assets);
+            group = keys.length > 0 ? assets[keys[0]] : null;
+          }
+          if (!group) return null;
+          if (typeof group === 'string') return group;
+          // 尊重 periods 声明：无时段变化时用 default key
+          var effectivePeriod = (theme.periods === false) ? 'default' : period;
+          // 时段回退链：指定时段 → default → 当前 period → 第一个可用 key
+          return group[effectivePeriod] || group.default || group[period] ||
+            (Object.keys(group).length > 0 ? group[Object.keys(group)[0]] : null);
+        }
+
         function themeAsset(themeId, weather, period) {
           var themes = window.__DW_THEMES__;
           if (!themes || !themes[themeId]) return null;
@@ -34,11 +56,13 @@
             if (t['_data_' + period]) return t['_data_' + period];
             if (t._userData) return t._userData;
           }
-          // 内置主题：从 assets 中取路径
-          var assets = t.assets && t.assets[weather];
-          if (!assets || !assets[period]) return null;
+          // 统一资源解析（内置主题 + 带 assets 的用户主题）
+          var assetPath = resolveThemeAsset(t, weather, period);
+          if (!assetPath) return null;
+          // 已是完整 URL（data: 等）则直接返回
+          if (assetPath.indexOf('data:') === 0 || assetPath.indexOf('://') > 3) return assetPath;
           var base = window.__DW_THEMES_BASE__ || './themes/';
-          return base + themeId + '/' + assets[period];
+          return base + themeId + '/' + assetPath;
         }
 
         // —— 渲染（static 主题）——
