@@ -62,7 +62,7 @@
             if (k === '__default__' || !existing[k]._isUser) target[k] = existing[k];
           }
           themes.forEach(function(t) {
-            target[t.id] = {
+            var entry = {
               id: t.id, name: t.name, type: t.type || 'static',
               periods: t.periods, weather: t.weather,
               asset: t.asset, assets: t.assets, desc: t.desc,
@@ -71,6 +71,13 @@
               _data_dusk: t._data_dusk, _data_night: t._data_night,
               _isUser: true,
             };
+            // P0-2: 复制所有 _data_<weather>_<period> 字段（晴雨二维数据）
+            for (var k in t) {
+              if (/^_data_(clear|rain)_(morning|day|dusk|night)$/.test(k)) {
+                entry[k] = t[k];
+              }
+            }
+            target[t.id] = entry;
           });
           window.__DW_THEMES__ = target;
         }
@@ -103,11 +110,17 @@
           return null;
         }
 
-        // —— 合并主题清单 ——
+        // —— 合并主题清单（P0-3: 按 ID 去重，用户主题覆盖内置同名）——
         window.__dwListAllThemes = function () {
           var builtin = window.__dwListThemes ? window.__dwListThemes() : [];
-          var user = (window.__DW_USER_THEMES__ || []).map(function (t) { return { id: t.id, name: t.name, type: t.type, desc: t.desc || '自定义', user: true, _userData: t._userData }; });
-          return builtin.concat(user);
+          var map = {};
+          builtin.forEach(function (t) { map[t.id] = t; });
+          (window.__DW_USER_THEMES__ || []).forEach(function (t) {
+            map[t.id] = { id: t.id, name: t.name, type: t.type, desc: t.desc || '自定义', user: true, _userData: t._userData };
+          });
+          var result = [];
+          for (var k in map) result.push(map[k]);
+          return result;
         };
 
         // —— 面板渲染 ——
@@ -329,11 +342,14 @@
             btn.onclick = function (e) { e.stopPropagation();
               var id = btn.dataset.id;
               if (!confirm('删除此主题？')) return;
+              // P0-4: 删除前保存当前主题状态，避免删除后 __dwGetActiveTheme 回退导致无法判断
+              var wasActive = window.__dwGetActiveTheme && window.__dwGetActiveTheme() === id;
+              var defaultId = (window.__DW_THEMES__ && window.__DW_THEMES__.__default__) || 'doraemon';
               deleteUserTheme(id).then(function () {
                 window.__DW_USER_THEMES__ = (window.__DW_USER_THEMES__ || []).filter(function (t) { return t.id !== id; });
                 // P1-5: 清理运行时注册表，防止删除后仍可选中
                 if (window.__DW_THEMES__ && window.__DW_THEMES__[id]) delete window.__DW_THEMES__[id];
-                if (window.__dwGetActiveTheme && window.__dwGetActiveTheme() === id) window.__dwSwitchTheme(window.__DW_THEMES__.__default__ || 'doraemon');
+                if (wasActive && window.__dwSwitchTheme) window.__dwSwitchTheme(defaultId);
                 buildPanel();
               }).catch(function (err) { alert('删除失败: ' + err.message); });
             };
@@ -545,14 +561,19 @@
 
 		          // —— 保存天气配置 ——
 		          var saveWeatherCfg = document.getElementById('dw-save-weather-cfg');
-		          if (saveWeatherCfg) saveWeatherCfg.onclick = function (e) { e.stopPropagation();
-		            var cfg = {};
-		            document.querySelectorAll('.dw-cfg').forEach(function(inp) { cfg[inp.dataset.k] = inp.value; });
-		            try { localStorage.setItem('dw-weather-config', JSON.stringify(cfg)); } catch(e) {}
-		            if (window.__dwWeatherAuto && window.__dwWeatherAuto.detect) window.__dwWeatherAuto.detect();
-		            _showSettings = false;
-		            buildPanel();
-		          };
+          if (saveWeatherCfg) saveWeatherCfg.onclick = function (e) { e.stopPropagation();
+            var cfg = {};
+            document.querySelectorAll('.dw-cfg').forEach(function(inp) { cfg[inp.dataset.k] = inp.value; });
+            try { localStorage.setItem('dw-weather-config', JSON.stringify(cfg)); } catch(e) {}
+            // P0-6: 保存后重启定时器（周期可能变化），否则只用旧周期
+            if (window.__dwWeatherRestart) {
+              window.__dwWeatherRestart();
+            } else if (window.__dwWeatherAuto && window.__dwWeatherAuto.detect) {
+              window.__dwWeatherAuto.detect();
+            }
+            _showSettings = false;
+            buildPanel();
+          };
 
 		          // —— 复制内置主题 ——
 	          PANEL.querySelectorAll('.dw-copy-btn').forEach(function (btn) {
@@ -623,6 +644,24 @@
 
         // —— 多图上传 ——
         function handleUploadMulti(name, files) {
+          // P0-5: 多图上传大小限制 — 先校验再读取，避免读到一半发现超限
+          var MAX_SINGLE = 20 * 1024 * 1024; // 单图 20MB
+          var MAX_TOTAL  = 60 * 1024 * 1024; // 四图总计 60MB
+          var pLabels = ['清晨', '白天', '黄昏', '夜晚'];
+          var totalSize = 0;
+          for (var fi = 0; fi < files.length; fi++) {
+            var f = files[fi];
+            if (!f) continue;
+            if (f.size > MAX_SINGLE) {
+              alert('图片「' + (pLabels[fi] || '') + '」过大（' + (f.size / 1024 / 1024).toFixed(1) + 'MB），单张最大 20MB');
+              return;
+            }
+            totalSize += f.size;
+          }
+          if (totalSize > MAX_TOTAL) {
+            alert('四张图片总计 ' + (totalSize / 1024 / 1024).toFixed(1) + 'MB，超过 60MB 限制');
+            return;
+          }
           var id = 'user-' + Date.now();
           var periods = ['morning', 'day', 'dusk', 'night'];
           var pNames = ['清晨', '白天', '黄昏', '夜晚'];
@@ -666,31 +705,44 @@
           });
 	        }
 
-	        // —— XHR 辅助：file:// 协议下载 blob → dataURL ——
-	        function xhrBlobAsDataUrl(url, cb) {
-	          var xhr = new XMLHttpRequest();
-	          xhr.open('GET', url, true);
-	          xhr.responseType = 'blob';
-	          xhr.onload = function () {
-	            if (xhr.status < 200 || xhr.status >= 300) { cb(new Error('HTTP ' + xhr.status)); return; }
-	            var r = new FileReader();
-	            r.onload = function (e) { cb(null, e.target.result); };
-	            r.readAsDataURL(xhr.response);
-	          };
-	          xhr.onerror = function () { cb(new Error('网络错误')); };
-	          xhr.send();
-	        }
-	        function xhrAsArrayBuffer(url, cb) {
-	          var xhr = new XMLHttpRequest();
-	          xhr.open('GET', url, true);
-	          xhr.responseType = 'arraybuffer';
-	          xhr.onload = function () {
-	            if (xhr.status < 200 || xhr.status >= 300) { cb(new Error('HTTP ' + xhr.status)); return; }
-	            cb(null, xhr.response);
-	          };
-	          xhr.onerror = function () { cb(new Error('网络错误')); };
-	          xhr.send();
-	        }
+        // —— XHR 辅助：file:// 协议下载 blob → dataURL ——
+        // P0-1: 所有本地 XHR 共用成功判断（2xx 或 status 0 + 有效内容）
+        function isLocalResponseOk(xhr) {
+          if (xhr.status >= 200 && xhr.status < 300) return true;
+          if (xhr.status !== 0) return false;
+          if (xhr.responseType === 'blob' || xhr.responseType === '') {
+            try { return !!(xhr.response && xhr.response.size > 0); } catch(e) { return false; }
+          }
+          if (xhr.responseType === 'arraybuffer') {
+            try { return !!(xhr.response && xhr.response.byteLength > 0); } catch(e) { return false; }
+          }
+          return !!(xhr.responseText && xhr.responseText.trim());
+        }
+        function xhrBlobAsDataUrl(url, cb) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', url, true);
+          xhr.responseType = 'blob';
+          xhr.onload = function () {
+            if (!isLocalResponseOk(xhr)) { cb(new Error('HTTP ' + xhr.status)); return; }
+            var r = new FileReader();
+            r.onload = function (e) { cb(null, e.target.result); };
+            r.onerror = function () { cb(new Error('FileReader 读取失败')); };
+            r.readAsDataURL(xhr.response);
+          };
+          xhr.onerror = function () { cb(new Error('网络错误')); };
+          xhr.send();
+        }
+        function xhrAsArrayBuffer(url, cb) {
+          var xhr = new XMLHttpRequest();
+          xhr.open('GET', url, true);
+          xhr.responseType = 'arraybuffer';
+          xhr.onload = function () {
+            if (!isLocalResponseOk(xhr)) { cb(new Error('HTTP ' + xhr.status)); return; }
+            cb(null, xhr.response);
+          };
+          xhr.onerror = function () { cb(new Error('网络错误')); };
+          xhr.send();
+        }
 
 	        // —— 复制内置主题到自定义 ——
 	        function copyBuiltinTheme(id) {
@@ -796,7 +848,10 @@
 	          var period = hour>=5&&hour<8?'morning':hour>=8&&hour<17?'day':hour>=17&&hour<19?'dusk':'night';
 	          var weather = window.__dwGetWeather ? window.__dwGetWeather() : 'clear';
 	          var base = window.__DW_THEMES_BASE__ || './themes/';
-          if (t._isUser && t['_data_' + period]) return t['_data_' + period];
+          if (t._isUser) {
+            if (t['_data_' + weather + '_' + period]) return t['_data_' + weather + '_' + period];
+            if (t['_data_' + period]) return t['_data_' + period];
+          }
           if (t._userData) return t._userData;
 	          if (t.assets && t.assets[weather] && t.assets[weather][period])
 	            return base + id + '/' + t.assets[weather][period];
@@ -875,8 +930,8 @@
 		            if (userTheme && userTheme._isUser) {
 		              // ★ 兜底注册：每一次切换前确保主题在 __DW_THEMES__ 中
 		              var target = window.__DW_THEMES__ || {};
-		              if (!target[id]) {
-                target[id] = {
+              if (!target[id]) {
+                var entry = {
                   id: userTheme.id, name: userTheme.name, type: userTheme.type || 'static',
                   periods: userTheme.periods, weather: userTheme.weather,
                   asset: userTheme.asset, assets: userTheme.assets, desc: userTheme.desc,
@@ -885,7 +940,14 @@
                   _data_dusk: userTheme._data_dusk, _data_night: userTheme._data_night,
                   _isUser: true,
                 };
-		              }
+                // P0-2: 复制所有 _data_<weather>_<period> 字段（晴雨二维数据）
+                for (var k in userTheme) {
+                  if (/^_data_(clear|rain)_(morning|day|dusk|night)$/.test(k)) {
+                    entry[k] = userTheme[k];
+                  }
+                }
+                target[id] = entry;
+              }
               if (userTheme.fileType === 'video') {
                 if (window.__dwLastBlobUrl) { URL.revokeObjectURL(window.__dwLastBlobUrl); window.__dwLastBlobUrl = null; }
                 // P1-4: 使用存储的 MIME 类型，不硬编码 video/mp4

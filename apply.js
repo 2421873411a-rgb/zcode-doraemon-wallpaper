@@ -265,15 +265,22 @@ async function main() {
 
   // 2) 检测 ZCode 是否在运行
   step('2/6  检测 ZCode 进程');
+  const forceInstall = process.argv.includes('--force');
   let running = false;
   try {
     const out = execSync('tasklist /FI "IMAGENAME eq ZCode.exe" /NH', { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
     running = /ZCode\.exe/i.test(out);
   } catch {}
-  if (running) {
-    warn('检测到 ZCode 正在运行。替换 app.asar 后需重启 ZCode 才能生效。');
-    warn('如果替换失败（文件被占用），请先完全退出 ZCode 再重跑本脚本。');
-  } else {
+  if (running && !forceInstall) {
+    console.error(`${C.red}✗ 检测到 ZCode 正在运行。${C.reset}`);
+    console.error(`${C.red}✗ 请完全退出 ZCode（任务栏右下角图标 → 右键 → 退出）后再运行本脚本。${C.reset}`);
+    console.error(`${C.red}✗ 对运行中宿主文件进行非原子覆盖存在损坏风险。${C.reset}`);
+    console.error(`${C.yellow}提示：如需强制继续，请运行 node apply.js --force${C.reset}`);
+    process.exit(2);
+  }
+  if (running && forceInstall) {
+    warn('ZCode 正在运行，--force 模式：将尝试覆盖 app.asar（如有旧备份可回滚）');
+  } else if (!running) {
     ok('ZCode 未运行，可直接替换。');
   }
 

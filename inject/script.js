@@ -51,8 +51,9 @@
           if (!themes || !themes[themeId]) return null;
           var t = themes[themeId];
           if (t.type === 'video') return null;
-          // 用户主题：优先按时段取 _data_<period>，再取通用 _userData
+          // 用户主题：优先取晴雨二维 _data_<weather>_<period>，再取 _data_<period>，最后取通用 _userData
           if (t._isUser) {
+            if (t['_data_' + weather + '_' + period]) return t['_data_' + weather + '_' + period];
             if (t['_data_' + period]) return t['_data_' + period];
             if (t._userData) return t._userData;
           }
