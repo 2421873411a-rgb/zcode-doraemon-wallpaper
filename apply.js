@@ -242,14 +242,52 @@ async function main() {
 	const settingsTpl = exists(path.join(INJECT_DIR, 'settings.js'))
 	  ? read(path.join(INJECT_DIR, 'settings.js')) : null;
   // 双套壁纸矩阵：clear/ + rain/ 各 4 张
+  // —— 模式：--refresh-only（仅重新生成 registry.js，不重打包）——
+  if (process.argv.includes('--refresh-only')) {
+    log(`${C.bold}${C.cyan}registry.js 刷新模式${C.reset}`);
+    const zcodeDir = findZCodeDir();
+    if (!zcodeDir) die('找不到 ZCode 安装目录。');
+    const td = path.join(zcodeDir, 'resources', 'themes');
+    generateRegistryJs(td);
+    log(`${C.green}完成！重启 ZCode 后新主题即可被发现。${C.reset}`);
+    process.exit(0);
+  }
+  // —— 模式：--refresh-theme-fallback（仅更新 FALLBACK + registry.js，不复制壁纸）——
+  const refreshFallbackOnly = process.argv.includes('--refresh-theme-fallback');
+
+  // 壁纸文件检查（--refresh-theme-fallback 模式跳过）
   const wpFiles = ['doraemon-morning.png', 'doraemon-day.png', 'doraemon-dusk.png', 'doraemon-night.png'];
   const wpDirs = ['clear', 'rain'];
   for (const d of wpDirs) {
     for (const f of wpFiles) {
-      if (!exists(path.join(WALLPAPER_SRC, d, f))) {
+      if (!refreshFallbackOnly && !exists(path.join(WALLPAPER_SRC, d, f))) {
         die(`缺少壁纸文件: wallpapers/${d}/${f}`);
       }
     }
+  }
+
+  // —— 辅助函数：生成 registry.js（供运行时动态加载，不依赖 XHR）——
+  function generateRegistryJs(themesDirParam) {
+    try {
+      const rp = path.join(themesDirParam, '_registry.json');
+      if (!exists(rp)) { warn('_registry.json 不存在，跳过 registry.js 生成'); return; }
+      const r = JSON.parse(read(rp));
+      const extThemes = { __default__: r.default || 'doraemon' };
+      for (const tid of (r.themes || [])) {
+        try {
+          const tp = path.join(themesDirParam, tid, 'theme.json');
+          if (exists(tp)) {
+            const tj = JSON.parse(read(tp));
+            extThemes[tj.id] = tj;
+          }
+        } catch (e2) { /* skip broken themes */ }
+      }
+      const jsContent = 'window.__DW_EXTERNAL_THEMES__ = ' + JSON.stringify(extThemes, null, 2) + ';\n';
+      const rjPath = path.join(themesDirParam, 'registry.js');
+      fs.writeFileSync(rjPath, jsContent, 'utf8');
+      ok(`registry.js 已更新（${Object.keys(extThemes).filter(k => k !== '__default__').length} 个主题）`);
+      return extThemes;
+    } catch (e) { warn('registry.js 生成失败: ' + e.message); return null; }
   }
 
   // 1) 定位 ZCode
@@ -378,6 +416,8 @@ async function main() {
       fallbackThemes[JSON.parse(doraTheme).id] = JSON.parse(doraTheme);
     } catch (e2) { /* 忽略 */ }
   }
+  // ★ 生成 registry.js（运行时动态加载的首选来源）
+  generateRegistryJs(themesDir);
   // 替换 engineTpl 中的占位符
   if (engineTpl) {
     engineTpl = engineTpl.replace('__BASE_TOKEN__', JSON.stringify(themesBaseUrl));
@@ -538,26 +578,33 @@ async function main() {
   fs.writeFileSync(idxPath, html, 'utf8');
   ok('index.html 注入完成');
 
-  // 4e) 复制壁纸（双套矩阵 clear/ + rain/）
-  const wpDest = path.join(workDir, 'out', 'renderer', 'wallpapers');
-  rmrf(wpDest);
-  fs.mkdirSync(wpDest, { recursive: true });
-  let copied = 0;
-  for (const d of wpDirs) {
-    const sub = path.join(wpDest, d);
-    fs.mkdirSync(sub, { recursive: true });
-    for (const f of wpFiles) {
-      fs.copyFileSync(path.join(WALLPAPER_SRC, d, f), path.join(sub, f));
-      copied++;
+  // 4e) 复制壁纸（双套矩阵 clear/ + rain/）— --refresh-theme-fallback 时跳过
+  let wpDest = null;
+  if (!refreshFallbackOnly) {
+    wpDest = path.join(workDir, 'out', 'renderer', 'wallpapers');
+    rmrf(wpDest);
+    fs.mkdirSync(wpDest, { recursive: true });
+    let copied = 0;
+    for (const d of wpDirs) {
+      const sub = path.join(wpDest, d);
+      fs.mkdirSync(sub, { recursive: true });
+      for (const f of wpFiles) {
+        fs.copyFileSync(path.join(WALLPAPER_SRC, d, f), path.join(sub, f));
+        copied++;
+      }
     }
+    ok(`已复制 ${copied} 张壁纸（晴/雨各 ${wpFiles.length} 张）`);
+  } else {
+    ok('--refresh-theme-fallback 模式：跳过壁纸复制');
   }
-  ok(`已复制 ${copied} 张壁纸（晴/雨各 ${wpFiles.length} 张）`);
 
-  // 4f) 复制 weather-config.json（v3.0 自动检测用，先放进 asar）
-  const cfgSrc = path.join(SCRIPT_DIR, 'weather-config.json');
-  if (exists(cfgSrc)) {
-    fs.copyFileSync(cfgSrc, path.join(wpDest, 'weather-config.json'));
-    ok('已复制 weather-config.json（v3.0 预留）');
+  // 4f) 复制 weather-config.json
+  if (!refreshFallbackOnly) {
+    const cfgSrc = path.join(SCRIPT_DIR, 'weather-config.json');
+    if (exists(cfgSrc)) {
+      fs.copyFileSync(cfgSrc, path.join(wpDest, 'weather-config.json'));
+      ok('已复制 weather-config.json（v3.0 预留）');
+    }
   }
 
   // 5) 重新打包
@@ -588,18 +635,21 @@ async function main() {
 	    rmrf(workDir); rmrf(newAsar);
 	    die('完整性校验失败：HTML 文档开头损坏（应始于 <!DOCTYPE 或 <html），已中止替换。请尝试从备份恢复。');
 	  }
-  // 壁纸数量
-  let wpCount = 0;
-  for (const d of wpDirs) {
-    for (const f of wpFiles) {
-      if (exists(path.join(wpDest, d, f))) wpCount++;
+  // 壁纸数量（--refresh-theme-fallback 跳过）
+  let wpCount = -1;
+  if (!refreshFallbackOnly) {
+    wpCount = 0;
+    for (const d of wpDirs) {
+      for (const f of wpFiles) {
+        if (exists(path.join(wpDest, d, f))) wpCount++;
+      }
+    }
+    if (wpCount < wpDirs.length * wpFiles.length) {
+      rmrf(workDir); rmrf(newAsar);
+      die(`完整性校验失败：壁纸不足（${wpCount}/${wpDirs.length * wpFiles.length}），已中止替换。`);
     }
   }
-  if (wpCount < wpDirs.length * wpFiles.length) {
-    rmrf(workDir); rmrf(newAsar);
-    die(`完整性校验失败：壁纸不足（${wpCount}/${wpDirs.length * wpFiles.length}），已中止替换。`);
-  }
-  ok(`完整性校验通过（${needMarks.length} 标记 + ${wpCount} 壁纸齐全）`);
+  ok(`完整性校验通过（${needMarks.length} 标记` + (wpCount >= 0 ? ` + ${wpCount} 壁纸` : '') + `齐全）`);
 
   // 6) 备份 + 原子替换
   step('6/6  备份原文件并原子替换');

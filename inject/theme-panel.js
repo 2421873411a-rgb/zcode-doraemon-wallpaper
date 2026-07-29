@@ -275,6 +275,11 @@
 	            })() +
 
 	          html += '<div style="margin-top:6px;font-size:10px;opacity:0.35;text-align:center;">Ctrl+W 面板 · Ctrl+R 晴雨 · Esc 关闭</div>';
+          // 诊断信息（开发者用）
+          if (window.__DW_DIAGNOSTICS__) {
+            var d = window.__DW_DIAGNOSTICS__;
+            html += '<div style="margin-top:4px;font-size:9px;opacity:0.25;text-align:center;">来源: ' + d.source + ' · ' + d.themeCount + ' 个主题' + (d.errors.length > 0 ? ' · ⚠ ' + d.errors.length + ' 错误' : '') + '</div>';
+          }
 	          PANEL.innerHTML = html;
 
 	          // —— 搜索框事件（DOM 过滤，不重建面板）——

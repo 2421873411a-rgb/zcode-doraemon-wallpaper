@@ -93,6 +93,24 @@ function addTheme(id, name, type, assetFile, desc) {
   if (!reg.default) reg.default = id;
   fs.writeFileSync(regPath, JSON.stringify(reg, null, 2));
 
+  // ★ 生成 registry.js — 运行时可通过动态 <script> 加载，不依赖同步 XHR
+  try {
+    var extThemes = { __default__: reg.default || id };
+    for (var ri = 0; ri < reg.themes.length; ri++) {
+      var tid = reg.themes[ri];
+      try {
+        var tp = path.join(THEMES_DIR, tid, 'theme.json');
+        if (fs.existsSync(tp)) {
+          var tj = JSON.parse(fs.readFileSync(tp, 'utf8'));
+          extThemes[tj.id] = tj;
+        }
+      } catch (e2) { /* skip broken themes */ }
+    }
+    var jsContent = 'window.__DW_EXTERNAL_THEMES__ = ' + JSON.stringify(extThemes, null, 2) + ';\n';
+    fs.writeFileSync(path.join(THEMES_DIR, 'registry.js'), jsContent, 'utf8');
+    ok('registry.js 已生成（' + (Object.keys(extThemes).length - 1) + ' 个主题）');
+  } catch (e) { warn('registry.js 生成失败: ' + e.message); }
+
   // P0-7: 自动验证写入结果
   var errors = [];
   // 1) 验证 _registry.json
