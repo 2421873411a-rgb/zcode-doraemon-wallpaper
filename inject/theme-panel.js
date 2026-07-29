@@ -240,11 +240,11 @@
             btn.onclick = function (e) { e.stopPropagation(); copyBuiltinTheme(btn.dataset.id); };
           });
 
-          // 上传按钮
+          // 上传按钮（★ 必须 stopPropagation，否则 buildPanel 重建 DOM 后点击冒泡到 document 会被误判为"外部点击"而关闭面板）
           var addBtn = document.getElementById('dw-add-btn');
-          if (addBtn) addBtn.onclick = function () { UPLOAD_MODE = true; buildPanel(); };
+          if (addBtn) addBtn.onclick = function (e) { e.stopPropagation(); UPLOAD_MODE = true; buildPanel(); };
           var cancelBtn = document.getElementById('dw-upload-cancel');
-          if (cancelBtn) cancelBtn.onclick = function () { UPLOAD_MODE = false; buildPanel(); };
+          if (cancelBtn) cancelBtn.onclick = function (e) { e.stopPropagation(); UPLOAD_MODE = false; buildPanel(); };
 
           // 文件选择（延迟创建 input，避免渲染时崩溃）
           var _selectedFile = null;
@@ -551,9 +551,15 @@
           if (e.key === 'Escape' && PANEL) PANEL.style.display = 'none';
         });
 
+        // 外部点击关闭面板（★ 加 _rebuilding 标志，避免 buildPanel 重建 DOM 时旧元素被误判为"外部"）
+        var _rebuilding = false;
+        var _origBuildPanel = buildPanel;
+        buildPanel = function () { _rebuilding = true; try { _origBuildPanel(); } finally { setTimeout(function () { _rebuilding = false; }, 200); } };
+
         document.addEventListener('click', function (e) {
+          if (_rebuilding) return; // 重建期间忽略所有外部点击判断
           if (PANEL && PANEL.style.display === 'block' && !PANEL.contains(e.target) && !e.ctrlKey)
-            setTimeout(function () { if (PANEL) PANEL.style.display = 'none'; }, 100);
+            setTimeout(function () { if (PANEL && !_rebuilding) PANEL.style.display = 'none'; }, 100);
         });
 
         // —— 启动 ——
