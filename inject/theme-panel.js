@@ -111,24 +111,28 @@
 
             html += '<div style="max-height:240px;overflow-y:auto;margin-bottom:6px;">';
             filtered.forEach(function (t) {
+              try {
               var isCur = t.id === active;
               var thu = thumbUrl(t.id, t);
+              // 缩略图过长（data URL）时不嵌入 HTML，避免字符串过大
+              var thuSafe = (thu && thu.length < 5000) ? thu : null;
               html += '<div class="dw-item" data-id="' + esc(t.id) + '" data-name="' + esc(t.name) + '" style="' +
                 'padding:5px 8px;margin:2px 0;border-radius:7px;cursor:pointer;' +
                 'background:' + (isCur ? 'rgba(126,182,255,0.25)' : 'rgba(255,255,255,0.06)') + ';' +
                 'border:1px solid ' + (isCur ? 'rgba(126,182,255,0.6)' : 'transparent') + ';' +
                 'display:flex;align-items:center;gap:8px;">';
-              if (thu) html += '<div style="width:36px;height:24px;border-radius:3px;flex-shrink:0;background-size:cover;background-position:center;background-image:url(\'' + thu + '\');"></div>';
+              if (thuSafe) html += '<div style="width:36px;height:24px;border-radius:3px;flex-shrink:0;background-size:cover;background-position:center;background-image:url(\'' + thuSafe.replace(/'/g, "\\'") + '\');"></div>';
               else html += '<span style="font-size:16px;width:36px;text-align:center;">' + (t.type === 'video' ? '🎬' : '🖼') + '</span>';
               html += '<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;">' + (isCur ? '● ' : '○ ') + esc(t.name) + '</span>';
               // 操作按钮
               if (t.user) {
-                html += '<span class="dw-rename-btn" data-id="' + t.id + '" style="cursor:pointer;opacity:0.35;padding:2px;" title="重命名">✏️</span>' +
-                  '<span class="dw-del-btn" data-id="' + t.id + '" style="cursor:pointer;opacity:0.35;padding:2px;" title="删除">✕</span>';
+                html += '<span class="dw-rename-btn" data-id="' + esc(t.id) + '" style="cursor:pointer;opacity:0.35;padding:2px;" title="重命名">✏️</span>' +
+                  '<span class="dw-del-btn" data-id="' + esc(t.id) + '" style="cursor:pointer;opacity:0.35;padding:2px;" title="删除">✕</span>';
               } else {
-                html += '<span class="dw-copy-btn" data-id="' + t.id + '" style="cursor:pointer;opacity:0.35;padding:2px;" title="复制">📋</span>';
+                html += '<span class="dw-copy-btn" data-id="' + esc(t.id) + '" style="cursor:pointer;opacity:0.35;padding:2px;" title="复制">📋</span>';
               }
               html += '</div>';
+              } catch (e) { /* 跳过单个主题的渲染错误 */ }
             });
             if (filtered.length === 0) html += '<div style="text-align:center;opacity:0.4;padding:20px;">无匹配主题</div>';
             html += '</div>';
@@ -138,18 +142,10 @@
               html += '<div id="dw-add-btn" style="padding:6px;text-align:center;cursor:pointer;border:1px dashed rgba(255,255,255,0.2);border-radius:7px;font-size:12px;margin-bottom:6px;">➕ 上传新主题</div>';
             } else {
               html += '<div style="border:1px solid rgba(255,255,255,0.12);border-radius:7px;padding:8px;margin-bottom:6px;">' +
-                '<div style="font-size:12px;font-weight:500;margin-bottom:4px;">📤 上传新主题</div>' +
                 '<input id="dw-upload-name" placeholder="主题名称" style="width:100%;box-sizing:border-box;padding:5px 6px;border-radius:5px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.3);color:#fff;font-size:12px;margin-bottom:4px;">' +
-                '<label style="font-size:10px;opacity:0.5;"><input id="dw-upload-multi" type="checkbox" ' + (UPLOAD_MULTI ? 'checked' : '') + '> 多图（四时段）</label>';
-              if (!UPLOAD_MULTI) {
-                html += '<input id="dw-upload-file" type="file" accept="image/*,video/*" style="font-size:11px;margin-top:3px;color:#fff;width:100%;">';
-              } else {
-                html += '<div style="font-size:10px;opacity:0.5;margin:3px 0;">清晨/白天/黄昏/夜晚 各一张</div>';
-                ['清晨', '白天', '黄昏', '夜晚'].forEach(function (n, i) {
-                  html += '<div style="display:flex;align-items:center;gap:3px;margin-bottom:2px;"><span style="width:28px;font-size:10px;opacity:0.6;">' + n + '</span><input class="dw-upload-mfile" data-idx="' + i + '" type="file" accept="image/*" style="font-size:10px;color:#fff;flex:1;"></div>';
-                });
-              }
-              html += '<div style="display:flex;gap:4px;margin-top:4px;">' +
+                '<div id="dw-drop-zone" style="padding:12px;text-align:center;border:1px dashed rgba(255,255,255,0.25);border-radius:6px;font-size:11px;opacity:0.7;margin-bottom:4px;cursor:pointer;">📁 点击选择或拖入文件<br><span style="font-size:9px;opacity:0.5;">图片≤20MB · 视频≤100MB</span></div>' +
+                '<div id="dw-file-info" style="font-size:10px;opacity:0.5;margin-bottom:4px;min-height:14px;"></div>' +
+                '<div style="display:flex;gap:4px;">' +
                 '<button id="dw-upload-save" style="flex:1;padding:4px;border:none;border-radius:5px;background:rgba(74,144,226,0.7);color:#fff;cursor:pointer;font-size:11px;">保存</button>' +
                 '<button id="dw-upload-cancel" style="flex:1;padding:4px;border:none;border-radius:5px;background:rgba(255,255,255,0.1);color:#fff;cursor:pointer;font-size:11px;">取消</button></div></div>';
             }
@@ -248,9 +244,36 @@
           var addBtn = document.getElementById('dw-add-btn');
           if (addBtn) addBtn.onclick = function () { UPLOAD_MODE = true; buildPanel(); };
           var cancelBtn = document.getElementById('dw-upload-cancel');
-          if (cancelBtn) cancelBtn.onclick = function () { UPLOAD_MODE = false; UPLOAD_MULTI = false; buildPanel(); };
-          var multiCb = document.getElementById('dw-upload-multi');
-          if (multiCb) multiCb.onchange = function () { UPLOAD_MULTI = this.checked; buildPanel(); };
+          if (cancelBtn) cancelBtn.onclick = function () { UPLOAD_MODE = false; buildPanel(); };
+
+          // 文件选择（延迟创建 input，避免渲染时崩溃）
+          var _selectedFile = null;
+          var dropZone = document.getElementById('dw-drop-zone');
+          var fileInfo = document.getElementById('dw-file-info');
+          if (dropZone) {
+            // 点击触发文件选择
+            dropZone.onclick = function () {
+              var inp = document.createElement('input');
+              inp.type = 'file'; inp.accept = 'image/*,video/*';
+              inp.onchange = function () {
+                _selectedFile = inp.files[0];
+                if (fileInfo && _selectedFile) {
+                  fileInfo.textContent = '✓ ' + _selectedFile.name + ' (' + (_selectedFile.size / 1024 / 1024).toFixed(1) + 'MB)';
+                }
+              };
+              inp.click();
+            };
+            // 拖拽支持
+            dropZone.ondragover = function (e) { e.preventDefault(); dropZone.style.borderColor = 'rgba(126,182,255,0.6)'; };
+            dropZone.ondragleave = function () { dropZone.style.borderColor = ''; };
+            dropZone.ondrop = function (e) {
+              e.preventDefault(); dropZone.style.borderColor = '';
+              if (e.dataTransfer.files[0]) {
+                _selectedFile = e.dataTransfer.files[0];
+                if (fileInfo) fileInfo.textContent = '✓ ' + _selectedFile.name + ' (' + (_selectedFile.size / 1024 / 1024).toFixed(1) + 'MB)';
+              }
+            };
+          }
 
           // 保存上传
           var saveBtn = document.getElementById('dw-upload-save');
@@ -259,17 +282,8 @@
             var name = nameInput ? nameInput.value.trim() : '';
             if (!name) { toast('请输入名称'); return; }
             if (name.length > 60) { toast('名称过长'); return; }
-            if (!UPLOAD_MULTI) {
-              var fi = document.getElementById('dw-upload-file');
-              if (!fi || !fi.files[0]) { toast('请选择文件'); return; }
-              handleUpload(name, fi.files[0]);
-            } else {
-              var fis = document.querySelectorAll('.dw-upload-mfile');
-              var files = [];
-              fis.forEach(function (f) { files.push(f.files[0] || null); });
-              if (files.every(function (f) { return f === null; })) { toast('请至少选一张图'); return; }
-              handleUploadMulti(name, files);
-            }
+            if (!_selectedFile) { toast('请选择文件'); return; }
+            handleUpload(name, _selectedFile);
           };
 
           // 导出
@@ -341,9 +355,14 @@
 
         // —— 单图上传 ——
         function handleUpload(name, file) {
-          var isVideo = file.type.startsWith('video/');
-          var limit = isVideo ? 200 * 1024 * 1024 : 20 * 1024 * 1024;
-          if (file.size > limit) { toast('文件过大（最大' + (isVideo ? '200MB' : '20MB') + '）'); return; }
+          // ★ 类型检测：优先 MIME，其次扩展名
+          var isVideo = /^video\//.test(file.type) || /\.(mp4|webm|mov|avi|mkv|wmv|flv)$/i.test(file.name);
+          var MAX_VIDEO = 100 * 1024 * 1024; // 100MB，避免 ArrayBuffer 内存溢出
+          var MAX_IMAGE = 20 * 1024 * 1024;
+          var limit = isVideo ? MAX_VIDEO : MAX_IMAGE;
+          if (file.size > limit) { toast('文件过大（最大' + (isVideo ? '200MB' : '20MB') + '），当前' + (file.size/1024/1024).toFixed(1) + 'MB'); return; }
+          if (!isVideo && file.size > MAX_IMAGE) { toast('图片最大20MB，当前' + (file.size/1024/1024).toFixed(1) + 'MB'); return; }
+          
           var id = 'user-' + Date.now();
           var reader = new FileReader();
           reader.onerror = function () { toast('文件读取失败'); };
