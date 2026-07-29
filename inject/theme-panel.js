@@ -331,6 +331,7 @@
             item.onclick = function (e) {
               if (e.target.classList.contains('dw-del-btn') || e.target.classList.contains('dw-rename-btn') || e.target.classList.contains('dw-copy-btn')) return;
               var id = item.dataset.id;
+              console.log('[DW:panel] CLICK theme=' + id);
               var result = window.__dwSwitchTheme(id);
               if (result !== false) {
                 active = id;
@@ -927,11 +928,14 @@
 	          _previewOverlay = null;
 	        }
 
-			        // —— 用户主题切换支持 ——
-		        var origSwitch = window.__dwSwitchTheme;
-		        if (origSwitch) {
-		          window.__dwSwitchTheme = function (id) {
-		            var userTheme = (window.__DW_USER_THEMES__ || []).find(function (t) { return t.id === id; });
+        // —— 用户主题切换支持 ——
+        var origSwitch = window.__dwSwitchTheme;
+        console.log('[DW:panel] origSwitch installed=' + (!!origSwitch));
+        if (origSwitch) {
+          window.__dwSwitchTheme = function (id) {
+            console.log('[DW:panel] override switch id=' + id);
+            var userTheme = (window.__DW_USER_THEMES__ || []).find(function (t) { return t.id === id; });
+            console.log('[DW:panel] isUser=' + (!!(userTheme && userTheme._isUser)) + ' fileType=' + (userTheme ? userTheme.fileType : 'N/A'));
 		            if (userTheme && userTheme._isUser) {
 		              // ★ 兜底注册：每一次切换前确保主题在 __DW_THEMES__ 中
 		              var target = window.__DW_THEMES__ || {};
@@ -962,8 +966,9 @@
               }
 		              window.__DW_THEMES__ = target;
 		            }
-		            var ret = origSwitch(id);
-		            return ret;
+            var ret = origSwitch(id);
+            console.log('[DW:panel] override result=' + ret);
+            return ret;
 		          };
 		        }
 

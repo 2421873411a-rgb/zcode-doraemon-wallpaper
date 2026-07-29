@@ -446,8 +446,23 @@ async function main() {
 		    info(`清理 ${staleCount} 个残留旧主题引擎块...`);
 		    html = html.replace(staleEngineRe, '');
 		    changed = true;
-		    ok('旧主题引擎已清理');
-		  }
+    ok('旧主题引擎已清理');
+  }
+
+  // 清理残留的旧标记块（THEMEENGINE / THEMEPANEL — 来自早期版本的命名不一致）
+  const staleMarkerNames = ['THEMEENGINE', 'THEMEPANEL'];
+  for (const sm of staleMarkerNames) {
+    const sBegin = '<!-- >>> ZCODE-WALLPAPER-' + sm + ' BEGIN >>> -->';
+    const sEnd = '<!-- <<< ZCODE-WALLPAPER-' + sm + ' END <<< -->';
+    if (html.includes(sBegin) && html.includes(sEnd)) {
+      const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp(esc(sBegin) + '[\\s\\S]*?' + esc(sEnd), 'g');
+      const count = (html.match(re) || []).length;
+      html = html.replace(re, '');
+      info(`清理 ${count} 个残留「${sm}」标记块`);
+      changed = true;
+    }
+  }
 
 	  // 4-0b) 修复历史损坏：<head> 被截断
 	  const beforeRepair = html.slice(0, Math.min(100, html.length));

@@ -111,11 +111,14 @@
           try { localStorage.setItem(STORAGE_KEY, id); } catch (e) {} return true;
         }
 
-	        function renderTheme(id, instant) {
-	          // 优先 _themes，fallback __DW_THEMES__（用户主题可能只注册到后者）
-	          var theme = _themes[id] || (window.__DW_THEMES__ && window.__DW_THEMES__[id]);
-	          var wp = document.getElementById('doraemon-wallpaper');
-	          if (!wp || !theme) return;
+        function renderTheme(id, instant) {
+          console.log('[DW:render] START id=' + id + ' instant=' + instant);
+          // 优先 _themes，fallback __DW_THEMES__（用户主题可能只注册到后者）
+          var theme = _themes[id] || (window.__DW_THEMES__ && window.__DW_THEMES__[id]);
+          var wp = document.getElementById('doraemon-wallpaper');
+          if (!wp) { console.error('[DW:render] FAIL — #doraemon-wallpaper 不存在！'); return; }
+          if (!theme) { console.error('[DW:render] FAIL — 主题「' + id + '」不在 _themes 也不在 __DW_THEMES__'); return; }
+          console.log('[DW:render] theme.type=' + theme.type + ' hasAsset=' + (!!theme.asset) + ' hasBlobUrl=' + (!!theme._blobUrl));
 	          // 同步到闭包，避免下次查找失败
 	          if (!_themes[id] && theme) _themes[id] = theme;
 
@@ -142,25 +145,68 @@
           if (theme.type === 'video') {
             var v = document.createElement('video');
             // 用户上传主题用 blob URL，内置主题用 file:// 路径
-            v.src = theme._blobUrl || (BASE + id + '/' + theme.asset);
+            var videoSrc = theme._blobUrl || (BASE + id + '/' + theme.asset);
+            console.log('[DW:render] video src=' + videoSrc.substring(0, 120));
+            
+            // ★ 如果 file:// 加载失败，尝试 XHR 读取视频 → blob URL
+            var tryXhrFallback = !theme._blobUrl; // 只对外置主题尝试
+            var xhrAttempted = false;
+            
+            function setVideoSource(src) {
+              v.src = src;
+            }
+            
+            v.onerror = function () {
+              var code = v.error ? v.error.code : '?';
+              var msg = v.error ? v.error.message : 'unknown';
+              _diag.lastVideoError = { id: id, src: v.src, code: code, message: msg, time: Date.now() };
+              console.error('[DW] ❌ 视频加载失败: ' + id + ' code=' + code + ' ' + msg);
+              
+              // 如果是 file:// 失败且还没尝试 XHR，改用 XHR 读取
+              if (tryXhrFallback && !xhrAttempted && videoSrc.indexOf('file://') === 0) {
+                console.log('[DW] 🔄 尝试 XHR 方式加载视频...');
+                xhrAttempted = true;
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', videoSrc, true);
+                xhr.responseType = 'arraybuffer';
+                xhr.onload = function () {
+                  var ok = (xhr.status >= 200 && xhr.status < 300) || (xhr.status === 0 && xhr.response && xhr.response.byteLength > 0);
+                  if (ok) {
+                    var blob = new Blob([xhr.response], { type: 'video/mp4' });
+                    var blobUrl = URL.createObjectURL(blob);
+                    console.log('[DW] ✅ XHR 读取成功, blobUrl=' + blobUrl);
+                    theme._blobUrl = blobUrl;
+                    // 更新 __DW_THEMES__ 中的缓存
+                    if (window.__DW_THEMES__ && window.__DW_THEMES__[id]) {
+                      window.__DW_THEMES__[id]._blobUrl = blobUrl;
+                    }
+                    if (_themes[id]) _themes[id]._blobUrl = blobUrl;
+                    v.src = blobUrl;
+                    v.load();
+                  } else {
+                    console.error('[DW] ❌ XHR 也失败了: status=' + xhr.status);
+                  }
+                };
+                xhr.onerror = function () { console.error('[DW] ❌ XHR 网络错误'); };
+                xhr.send();
+              }
+            };
+            v.onloadeddata = function () { console.log('[DW] ✅ 视频首帧就绪: ' + id); };
+            v.onloadstart = function () { console.log('[DW] 🎬 视频开始加载: ' + id); };
+            v.oncanplay = function () { console.log('[DW] ▶ 视频可播放: ' + id); };
+            
+            setVideoSource(videoSrc);
             v.autoplay = true; v.loop = true; v.muted = true; v.playsInline = true;
             Object.assign(v.style, {
               position: 'absolute', inset: '0', width: '100%', height: '100%',
               objectFit: 'cover', pointerEvents: 'none',
             });
-            // 视频加载错误日志（定位 file:// 被拦截等问题）
-            v.onerror = function () {
-              var code = v.error ? v.error.code : '?';
-              var msg = v.error ? v.error.message : 'unknown';
-              _diag.lastVideoError = { id: id, src: v.src, code: code, message: msg, time: Date.now() };
-              console.error('[DW] 视频加载失败: ' + id + ' code=' + code + ' ' + msg + ' src=' + v.src);
-            };
-            v.onloadeddata = function () { console.log('[DW] 视频就绪: ' + id); };
             wrapper.appendChild(v);
-	            wp.appendChild(wrapper);
-	            document.documentElement.dataset.themeType = 'video';
-	            document.documentElement.dataset.period = 'video';
-	            document.documentElement.dataset.weather = 'clear';
+            wp.appendChild(wrapper);
+            console.log('[DW:render] wrapper appended to DOM');
+            document.documentElement.dataset.themeType = 'video';
+            document.documentElement.dataset.period = 'video';
+            document.documentElement.dataset.weather = 'clear';
 	          } else {
 	            document.documentElement.dataset.themeType = 'static';
 	            ['morning', 'day', 'dusk', 'night'].forEach(function (period) {
@@ -183,10 +229,12 @@
 	        }
 
         window.__dwSwitchTheme = function (id) {
-          if (!setActiveTheme(id)) return false;
+          console.log('[DW:switch] ENTER id=' + id);
+          if (!setActiveTheme(id)) { console.log('[DW:switch] FAIL — setActiveTheme returned false'); return false; }
           renderTheme(id);
           var panel = document.getElementById('dw-theme-panel');
           if (panel) panel.style.display = 'none';
+          console.log('[DW:switch] DONE id=' + id);
           return true;
         };
         window.__dwGetActiveTheme = getActiveTheme;
