@@ -5,42 +5,66 @@
  * 作用：把"四时段壁纸自动切换 + 全透明 UI + 无框按钮"机制
  *       注入到 ZCode 的 app.asar 里。幂等，可重复运行。
  *
+ * 安全特性：
+ *   - SHA-256 完整性校验（原始 asar、备份、新 asar）
+ *   - 最终包重新解包验证（不信任打包过程的隐式正确性）
+ *   - 原子重命名替换（无 copyFileSync 降级）
+ *   - 事务状态文件，中断后可检测和恢复
+ *   - 宿主版本指纹白名单
+ *   - --restore latest 自动回滚
+ *
  * 用法：
  *   1) 双击"一键重装.bat"
  *   2) 或命令行：node apply.js
- *
- * 适用场景：ZCode 升级覆盖了 app.asar 后，重新运行本脚本即可恢复壁纸机制。
+ *   3) 回滚：node apply.js --restore latest
+ *   4) 检查：node apply.js --check
  * ========================================================================== */
 
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
+
+// ==========================================================================
+// 版本与兼容性声明
+// ==========================================================================
+const PATCHER_VERSION = '0.6.0-beta.2';
+const PATCHER_SCHEMA = 1;
+
+// 已知兼容的 ZCode 版本白名单（空数组 = 信任所有，有值则严格匹配）
+const COMPATIBLE_ZCODE_VERSIONS = [];
+
+// 需要从解包 index.html 中检查的结构锚点
+const REQUIRED_ANCHORS = ['</style>', '</body>'];
+
+// 事务状态文件名（放在 resources/ 下）
+const TRANSACTION_FILE = '.zcode-wallpaper-transaction.json';
 
 // ---------- 配置 ----------
 const SCRIPT_DIR = __dirname;
 const INJECT_DIR = path.join(SCRIPT_DIR, 'inject');
 const WALLPAPER_SRC = path.join(SCRIPT_DIR, 'wallpapers');
 
-// 幂等标记：注入的内容用这对注释包起来，重复运行时先移除旧块
+// 幂等标记
 const MARK_BEGIN = '/* >>> ZCODE-WALLPAPER-INJECT BEGIN >>> */';
 const MARK_END = '/* <<< ZCODE-WALLPAPER-INJECT END <<< */';
 const BODY_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-BODY BEGIN >>> -->';
 const BODY_MARK_END = '<!-- <<< ZCODE-WALLPAPER-BODY END <<< -->';
 const SCRIPT_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-SCRIPT BEGIN >>> -->';
 const SCRIPT_MARK_END = '<!-- <<< ZCODE-WALLPAPER-SCRIPT END <<< -->';
-	const SWITCHER_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-SWITCHER BEGIN >>> -->';
-	const SWITCHER_MARK_END = '<!-- <<< ZCODE-WALLPAPER-SWITCHER END <<< -->';
-	const WEATHER_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-WEATHER BEGIN >>> -->';
-	const WEATHER_MARK_END = '<!-- <<< ZCODE-WALLPAPER-WEATHER END <<< -->';
-	const ENGINE_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-ENGINE BEGIN >>> -->';
-	const ENGINE_MARK_END = '<!-- <<< ZCODE-WALLPAPER-ENGINE END <<< -->';
-	const PANEL_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-PANEL BEGIN >>> -->';
-	const PANEL_MARK_END = '<!-- <<< ZCODE-WALLPAPER-PANEL END <<< -->';
-	const RAIN_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-RAIN BEGIN >>> -->';
-	const RAIN_MARK_END = '<!-- <<< ZCODE-WALLPAPER-RAIN END <<< -->';
-	const SETTINGS_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-SETTINGS BEGIN >>> -->';
-	const SETTINGS_MARK_END = '<!-- <<< ZCODE-WALLPAPER-SETTINGS END <<< -->';
+const SWITCHER_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-SWITCHER BEGIN >>> -->';
+const SWITCHER_MARK_END = '<!-- <<< ZCODE-WALLPAPER-SWITCHER END <<< -->';
+const WEATHER_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-WEATHER BEGIN >>> -->';
+const WEATHER_MARK_END = '<!-- <<< ZCODE-WALLPAPER-WEATHER END <<< -->';
+const ENGINE_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-ENGINE BEGIN >>> -->';
+const ENGINE_MARK_END = '<!-- <<< ZCODE-WALLPAPER-ENGINE END <<< -->';
+const PANEL_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-PANEL BEGIN >>> -->';
+const PANEL_MARK_END = '<!-- <<< ZCODE-WALLPAPER-PANEL END <<< -->';
+const RAIN_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-RAIN BEGIN >>> -->';
+const RAIN_MARK_END = '<!-- <<< ZCODE-WALLPAPER-RAIN END <<< -->';
+const SETTINGS_MARK_BEGIN = '<!-- >>> ZCODE-WALLPAPER-SETTINGS BEGIN >>> -->';
+const SETTINGS_MARK_END = '<!-- <<< ZCODE-WALLPAPER-SETTINGS END <<< -->';
 
 // ---------- 彩色日志 ----------
 const C = {
@@ -55,18 +79,54 @@ const step = (m) => log(`\n${C.bold}${C.magenta}▶ ${m}${C.reset}`);
 const warn = (m) => log(`${C.yellow}!${C.reset} ${m}`);
 const die = (m) => { console.error(`${C.red}✗ ${m}${C.reset}`); process.exit(1); };
 
-// ---------- 工具 ----------
+// ---------- 工具函数 ----------
 function read(p) { return fs.readFileSync(p, 'utf8'); }
 function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
 function rmrf(p) { if (exists(p)) fs.rmSync(p, { recursive: true, force: true }); }
 
-// 自动定位 ZCode 安装目录
+// SHA-256 哈希
+function sha256(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', (d) => hash.update(d));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
+}
+
+// 同步版 SHA-256（小文件用）
+function sha256Sync(filePath) {
+  const content = fs.readFileSync(filePath);
+  return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+// ---------- 事务管理 ----------
+function transactionPath(resourcesDir) {
+  return path.join(resourcesDir, TRANSACTION_FILE);
+}
+
+function loadTransaction(resourcesDir) {
+  const tp = transactionPath(resourcesDir);
+  if (!exists(tp)) return null;
+  try { return JSON.parse(read(tp)); } catch { return null; }
+}
+
+function saveTransaction(resourcesDir, state) {
+  const tp = transactionPath(resourcesDir);
+  fs.writeFileSync(tp, JSON.stringify(state, null, 2), 'utf8');
+}
+
+function clearTransaction(resourcesDir) {
+  const tp = transactionPath(resourcesDir);
+  if (exists(tp)) fs.unlinkSync(tp);
+}
+
+// ---------- 自动定位 ZCode ----------
 function findZCodeDir() {
-  // 1) 环境变量显式指定（最高优先级）：set ZCODE_DIR=D:\应用\Zcode
   if (process.env.ZCODE_DIR && exists(path.join(process.env.ZCODE_DIR, 'resources', 'app.asar'))) {
     return process.env.ZCODE_DIR;
   }
-  // 2) 常见安装路径
   const candidates = [
     'D:\\应用\\Zcode',
     'C:\\Program Files\\ZCode',
@@ -77,14 +137,8 @@ function findZCodeDir() {
   for (const c of candidates) {
     if (exists(path.join(c, 'resources', 'app.asar'))) return c;
   }
-  // 3) 从 PATH 里 ripgrep 路径反推（ZCode 会把 tools 加进 PATH）
   try {
     const pathVar = process.env.PATH || '';
-    for (const seg of pathVar.split(/;|:/)) {
-      const m = seg.match(/^(.+?)[\\/]resources[\\/]tools/i);
-      if (m && exists(path.join(m[1], 'resources', 'app.asar'))) return m[1];
-    }
-    // 形如 D:\应用\Zcode\resources\tools\ripgrep
     for (const seg of pathVar.split(/;|:/)) {
       const m = seg.match(/^(.+?)[\\/]Zcode([\\/]|$)/i);
       if (m) {
@@ -96,13 +150,10 @@ function findZCodeDir() {
   return null;
 }
 
-// asar 操作：优先用本地 asar@3.x（CommonJS，自包含、零网络依赖），失败再回退 npx
-// 注意：@electron/asar@4 是纯 ESM 无法 require，故用 asar@3.2.0（CJS，稳定）。
-// 返回 {ok:boolean, error:string}，调用方据此判断
+// ---------- asar ----------
 let _asarLib = null;
 function loadAsar() {
   if (_asarLib) return _asarLib;
-  // 1) 本地工具包自带的 asar（CJS）
   const localPaths = [
     path.join(SCRIPT_DIR, 'node_modules', 'asar'),
     path.join(__dirname, 'node_modules', 'asar'),
@@ -112,18 +163,14 @@ function loadAsar() {
       try { _asarLib = require(p); return _asarLib; } catch (e) {}
     }
   }
-  // 2) 退化：尝试全局/npx 缓存里的 asar
   try { _asarLib = require('asar'); return _asarLib; } catch (e) {}
   return null;
 }
 
-// 同步解包：extractAll(srcAsar, destDir)
 function asarExtract(srcAsar, destDir) {
   const lib = loadAsar();
   if (!lib) return { ok: false, error: '未找到 @electron/asar 依赖，请在工具包目录运行 npm install' };
   try {
-    // extractAll 会抛错（如缺 .unpacked 文件）；但我们只需要 out/renderer，
-    // 容错：先用 extractAll，失败则用 extractFile 单独取需要的文件
     lib.extractAll(srcAsar, destDir);
     return { ok: true };
   } catch (e) {
@@ -131,7 +178,6 @@ function asarExtract(srcAsar, destDir) {
   }
 }
 
-// 异步打包：createPackage 是 async function，必须 await 否则 Promise rejection 漏掉
 async function asarPack(srcDir, destAsar) {
   const lib = loadAsar();
   if (!lib) return { ok: false, error: '未找到 asar 依赖' };
@@ -143,8 +189,7 @@ async function asarPack(srcDir, destAsar) {
   }
 }
 
-// 幂等替换：移除 [begin,end] 之间的旧内容（含标记），插入新内容
-//   注意：对 newContent 做 trim，保证首次插入和后续替换产出完全一致（幂等）。
+// ---------- 幂等替换 ----------
 function replaceBlock(text, beginMark, endMark, newContent) {
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp(esc(beginMark) + '[\\s\\S]*?' + esc(endMark));
@@ -152,99 +197,346 @@ function replaceBlock(text, beginMark, endMark, newContent) {
   if (re.test(text)) {
     return text.replace(re, block);
   }
-  return null; // 没有旧块，需要由调用方决定插入位置
+  return null;
 }
 
-// 清理 v1.0 遗留：v1.0 是手工注入（无标记注释），需识别其特征并移除，
-// 否则升级到 v2.0（带标记）时会与旧内容并存导致重复。
-// 特征锚点（与 v1.0 模板一致）：
-//   CSS:  "/* ============ 四时壁纸自动切换（哆啦A梦主题）============ */" 到 "</style>"
-//   body: "<!-- 四时壁纸层" 到对应 "</div>"
-//   JS:   "    <script>\n      // ============ 四时壁纸自动切换" 到 "</script>"
-	function stripV1Legacy(html) {
-	  let out = html;
-	  // CSS 块：删除 v1.0 注入的 CSS 内容（在 <style> 内的尾巴），但保留 </style>
-	  const cssMark = '/* ============ 四时壁纸自动切换';
-	  let i = out.indexOf(cssMark);
-	  if (i >= 0) {
-	    let j = out.indexOf('</style>', i);
-	    if (j > i) {
-	      // 仅移除从 cssMark 到 </style> 之间的内容，</style> 本身保留
-	      out = out.slice(0, i) + out.slice(j);
-	    }
-	  }
-	  // body 壁纸层
-	  out = out.replace(/[ \t]*<!-- 四时壁纸层[\s\S]*?<\/div>\n/, '');
-	  // JS 块：匹配 v1.0 那个 <script>（含”四时壁纸自动切换”注释）
-	  const jsMark = '    <script>\n      // ============ 四时壁纸自动切换';
-	  i = out.indexOf(jsMark);
-	  if (i >= 0) {
-	    let j = out.indexOf('</script>', i);
-	    if (j > i) out = out.slice(0, i) + out.slice(j + '</script>'.length);
-	  }
-	  return out;
-	}
+// ---------- v1.0 遗留清理 ----------
+function stripV1Legacy(html) {
+  let out = html;
+  const cssMark = '/* ============ 四时壁纸自动切换';
+  let i = out.indexOf(cssMark);
+  if (i >= 0) {
+    let j = out.indexOf('</style>', i);
+    if (j > i) out = out.slice(0, i) + out.slice(j);
+  }
+  out = out.replace(/[ \t]*<!-- 四时壁纸层[\s\S]*?<\/div>\n/, '');
+  const jsMark = '    <script>\n      // ============ 四时壁纸自动切换';
+  i = out.indexOf(jsMark);
+  if (i >= 0) {
+    let j = out.indexOf('</script>', i);
+    if (j > i) out = out.slice(0, i) + out.slice(j + '</script>'.length);
+  }
+  return out;
+}
 
-	// 修复历史损坏：文档开头被截断（<head> 内 <meta>/<title> 等被 <style> 吞噬或截断）
-	// 特征：文件开头不是 <!DOCTYPE 或 <html
-	function repairBrokenHead(html) {
-	  const trimmed = html.trimStart();
-	  if (/^<!DOCTYPE/i.test(trimmed) || /^<html/i.test(trimmed)) {
-	    return html; // 没损坏
-	  }
-	  // 损坏了：找到 <title> 和 <style> 来重构 head
-	  info('检测到 <head> 损坏，正在修复...');
-	  const titleIdx = html.indexOf('<title');
-	  const styleIdx = html.indexOf('<style');
-	  if (titleIdx < 0 || styleIdx < 0) {
-	    warn('无法修复：缺少 <title> 或 <style>');
-	    return html;
-	  }
-	  // 从 title 开始恢复：前面补全 DOCTYPE + html + head + meta
-	  const metaTag = '<meta name="viewport" content="width=device-width, initial-scale=1.0" />';
-	  const headStart = '<!DOCTYPE html>\n<html>\n<head>\n' + metaTag + '\n';
-	  // title 和 style 之间的部分不动
-	  // 确保第一个出现的 body 之前有 </head>
-	  html = headStart + html.slice(titleIdx);
-	  const bodyIdx = html.indexOf('<body');
-	  if (bodyIdx >= 0) {
-	    const beforeBody = html.slice(0, bodyIdx);
-	    if (!beforeBody.includes('</head>')) {
-	      // 在 <body 前插入 </head>
-	      const headEndIdx = html.lastIndexOf('>', bodyIdx - 1) + 1;
-	      html = html.slice(0, headEndIdx) + '\n</head>\n' + html.slice(headEndIdx);
-	    }
-	  }
-		  return html;
-		}
-	
-	// ---------- 主流程 ----------
-async function main() {
+function repairBrokenHead(html) {
+  const trimmed = html.trimStart();
+  if (/^<!DOCTYPE/i.test(trimmed) || /^<html/i.test(trimmed)) {
+    return html;
+  }
+  info('检测到 <head> 损坏，正在修复...');
+  const titleIdx = html.indexOf('<title');
+  const styleIdx = html.indexOf('<style');
+  if (titleIdx < 0 || styleIdx < 0) {
+    warn('无法修复：缺少 <title> 或 <style>');
+    return html;
+  }
+  const metaTag = '<meta name="viewport" content="width=device-width, initial-scale=1.0" />';
+  const headStart = '<!DOCTYPE html>\n<html>\n<head>\n' + metaTag + '\n';
+  html = headStart + html.slice(titleIdx);
+  const bodyIdx = html.indexOf('<body');
+  if (bodyIdx >= 0) {
+    const beforeBody = html.slice(0, bodyIdx);
+    if (!beforeBody.includes('</head>')) {
+      const headEndIdx = html.lastIndexOf('>', bodyIdx - 1) + 1;
+      html = html.slice(0, headEndIdx) + '\n</head>\n' + html.slice(headEndIdx);
+    }
+  }
+  return html;
+}
+
+// ---------- 生成 registry.js ----------
+function generateRegistryJs(themesDirParam) {
+  try {
+    const rp = path.join(themesDirParam, '_registry.json');
+    if (!exists(rp)) { warn('_registry.json 不存在，跳过 registry.js 生成'); return; }
+    const r = JSON.parse(read(rp));
+    const extThemes = { __default__: r.default || 'doraemon' };
+    for (const tid of (r.themes || [])) {
+      try {
+        const tp = path.join(themesDirParam, tid, 'theme.json');
+        if (exists(tp)) {
+          const tj = JSON.parse(read(tp));
+          extThemes[tj.id] = tj;
+        }
+      } catch (e2) { /* skip broken themes */ }
+    }
+    const jsContent = 'window.__DW_EXTERNAL_THEMES__ = ' + JSON.stringify(extThemes, null, 2) + ';\n';
+    const rjPath = path.join(themesDirParam, 'registry.js');
+    fs.writeFileSync(rjPath, jsContent, 'utf8');
+    ok(`registry.js 已更新（${Object.keys(extThemes).filter(k => k !== '__default__').length} 个主题）`);
+    return extThemes;
+  } catch (e) { warn('registry.js 生成失败: ' + e.message); return null; }
+}
+
+// ---------- 验证最终 ASAR（重新解包检查） ----------
+async function verifyFinalAsar(asarPath, expectedMarks, expectedWpCount) {
+  info('最终包验证：重新解包检查...');
+  const verifyDir = path.join(os.tmpdir(), 'zcode-wp-verify-' + Date.now());
+  rmrf(verifyDir);
+  fs.mkdirSync(verifyDir, { recursive: true });
+
+  const er = asarExtract(asarPath, verifyDir);
+  if (!er.ok) {
+    rmrf(verifyDir);
+    return { ok: false, error: '最终包解包失败: ' + er.error };
+  }
+
+  // 验证 index.html
+  const idxPath = path.join(verifyDir, 'out', 'renderer', 'index.html');
+  if (!exists(idxPath)) {
+    rmrf(verifyDir);
+    return { ok: false, error: '最终包缺少 out/renderer/index.html' };
+  }
+
+  const html = read(idxPath);
+  const missing = expectedMarks.filter(m => !html.includes(m));
+  if (missing.length > 0) {
+    rmrf(verifyDir);
+    return { ok: false, error: '最终包缺少注入标记: ' + missing.join(', ') };
+  }
+
+  const trimmed = html.trimStart();
+  if (!/^<!DOCTYPE/i.test(trimmed) && !/^<html/i.test(trimmed)) {
+    rmrf(verifyDir);
+    return { ok: false, error: '最终包 HTML 文档结构损坏' };
+  }
+
+  // 验证壁纸文件
+  let wpCount = 0;
+  const wpDirs = ['clear', 'rain'];
+  const wpFiles = ['doraemon-morning.png', 'doraemon-day.png', 'doraemon-dusk.png', 'doraemon-night.png'];
+  if (expectedWpCount > 0) {
+    for (const d of wpDirs) {
+      for (const f of wpFiles) {
+        if (exists(path.join(verifyDir, 'out', 'renderer', 'wallpapers', d, f))) wpCount++;
+      }
+    }
+    if (wpCount < expectedWpCount) {
+      rmrf(verifyDir);
+      return { ok: false, error: `最终包壁纸不足 (${wpCount}/${expectedWpCount})` };
+    }
+  }
+
+  // 计算最终包 SHA-256
+  const packHash = sha256Sync(asarPath);
+
+  rmrf(verifyDir);
+  return { ok: true, sha256: packHash, markCount: expectedMarks.length, wpCount };
+}
+
+// ---------- 生成构建 manifest ----------
+function generateBuildManifest(zcodeDir, zcodeVersion, origAsarSha256, newAsarSha256, indexSha256) {
+  return {
+    patcherVersion: PATCHER_VERSION,
+    schemaVersion: PATCHER_SCHEMA,
+    buildTime: new Date().toISOString(),
+    zcode: {
+      dir: zcodeDir,
+      version: zcodeVersion || 'unknown',
+      asarSha256: origAsarSha256,
+      indexSha256: indexSha256,
+    },
+    result: {
+      newAsarSha256: newAsarSha256,
+    },
+    modules: ['css', 'body', 'script', 'switcher', 'weather', 'engine', 'panel', 'rain', 'settings'],
+  };
+}
+
+// ---------- 检测 ZCode 版本 ----------
+function detectZCodeVersion(zcodeDir) {
+  // 尝试从 app-update.yml 或 package.json 获取版本
+  const updateYml = path.join(zcodeDir, 'resources', 'app-update.yml');
+  if (exists(updateYml)) {
+    try {
+      const content = read(updateYml);
+      const m = content.match(/^version:\s*["']?([^\s"']+)["']?/m);
+      if (m) return m[1];
+    } catch {}
+  }
+  // 尝试从 electron 的 app.asar 中获取
+  return null;
+}
+
+// ======================================================================
+//  --restore 命令
+// ======================================================================
+async function cmdRestore() {
   log(`${C.bold}${C.cyan}╔════════════════════════════════════════════╗${C.reset}`);
-  log(`${C.bold}${C.cyan}║  ZCode 哆啦A梦四时壁纸 · 一键重装工具      ║${C.reset}`);
+  log(`${C.bold}${C.cyan}║  ZCode 壁纸 · 自动回滚工具               ║${C.reset}`);
   log(`${C.bold}${C.cyan}╚════════════════════════════════════════════╝${C.reset}`);
 
-  // 0) 前置检查
+  const zcodeDir = findZCodeDir();
+  if (!zcodeDir) die('找不到 ZCode 安装目录。');
+  const resourcesDir = path.join(zcodeDir, 'resources');
+  const asarPath = path.join(resourcesDir, 'app.asar');
+
+  // 列出所有备份
+  const backups = fs.readdirSync(resourcesDir)
+    .filter(f => f.startsWith('app.asar.bak.'))
+    .sort()
+    .reverse();
+
+  if (backups.length === 0) die('未找到任何备份文件。');
+
+  const target = process.argv.includes('--restore') ? 'latest' : null;
+  // 如果参数是 --restore <name>，匹配
+  const restoreIdx = process.argv.indexOf('--restore');
+  const explicitName = (restoreIdx >= 0 && restoreIdx < process.argv.length - 1) ? process.argv[restoreIdx + 1] : 'latest';
+
+  let backupFile;
+  if (explicitName === 'latest') {
+    backupFile = backups[0];
+    info(`最近的备份: ${backupFile} (共 ${backups.length} 个备份可用)`);
+  } else {
+    const match = backups.find(f => f.includes(explicitName));
+    if (!match) die(`未找到匹配 "${explicitName}" 的备份。可用备份:\n  ${backups.join('\n  ')}`);
+    backupFile = match;
+  }
+
+  const bakPath = path.join(resourcesDir, backupFile);
+  log(`\n即将从备份恢复: ${backupFile}`);
+
+  // 验证备份完整性
+  step('校验备份文件');
+  if (!exists(bakPath)) die('备份文件不存在: ' + bakPath);
+  const bakSize = fs.statSync(bakPath).size;
+  if (bakSize < 1000000) die('备份文件过小，可能已损坏。');
+  ok(`备份大小: ${(bakSize / 1048576).toFixed(1)} MB`);
+
+  // 备份当前 app.asar 为可追溯的 previous
+  step('备份当前 app.asar → app.asar.previous');
+  const ts = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+  const previousPath = path.join(resourcesDir, `app.asar.previous.${ts}`);
+  try {
+    fs.copyFileSync(asarPath, previousPath);
+    ok(`当前版本已备份: ${path.basename(previousPath)}`);
+  } catch (e) {
+    warn('无法备份当前版本: ' + e.message + '（继续恢复）');
+  }
+
+  // 原子替换
+  step('恢复备份');
+  const tmpPath = asarPath + '.restore-tmp-' + Date.now();
+  try {
+    fs.copyFileSync(bakPath, tmpPath);
+    // 验证临时文件
+    const tmpSize = fs.statSync(tmpPath).size;
+    if (tmpSize !== bakSize) throw new Error('临时文件大小不匹配');
+    // 原子重命名
+    try {
+      fs.renameSync(tmpPath, asarPath);
+    } catch (rErr) {
+      if (rErr.code === 'EPERM' || rErr.code === 'EBUSY') {
+        die('无法替换 app.asar，请完全退出 ZCode 后重试。');
+      }
+      throw rErr;
+    }
+  } catch (e) {
+    try { if (exists(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+    die('恢复失败: ' + e.message);
+  }
+
+  ok(`已恢复至 ${backupFile}`);
+  log(`\n${C.green}完成！请完全退出 ZCode 并重新打开。${C.reset}`);
+  log(`如需要回退此操作，可用 --restore 指定 ${path.basename(previousPath)}`);
+}
+
+// ======================================================================
+//  --check 命令
+// ======================================================================
+async function cmdCheck() {
+  log(`${C.bold}${C.cyan}╔════════════════════════════════════════════╗${C.reset}`);
+  log(`${C.bold}${C.cyan}║  ZCode 壁纸 · 环境诊断                   ║${C.reset}`);
+  log(`${C.bold}${C.cyan}╚════════════════════════════════════════════╝${C.reset}`);
+
+  const zcodeDir = findZCodeDir();
+  if (!zcodeDir) { warn('未找到 ZCode 安装目录。'); return; }
+  ok(`ZCode 目录: ${zcodeDir}`);
+
+  const resourcesDir = path.join(zcodeDir, 'resources');
+  const asarPath = path.join(resourcesDir, 'app.asar');
+  if (!exists(asarPath)) { warn('app.asar 不存在'); return; }
+
+  const asarSize = fs.statSync(asarPath).size;
+  const asarHash = sha256Sync(asarPath);
+  ok(`app.asar: ${(asarSize / 1048576).toFixed(1)} MB`);
+  info(`SHA-256: ${asarHash}`);
+
+  // 检测版本
+  const ver = detectZCodeVersion(zcodeDir);
+  if (ver) ok(`ZCode 版本: ${ver}`);
+
+  // 检查事务
+  const tx = loadTransaction(resourcesDir);
+  if (tx) {
+    warn(`存在未清理的事务记录 (${tx.buildTime})`);
+    if (tx.result && tx.result.newAsarSha256) {
+      info(`上次构建 SHA-256: ${tx.result.newAsarSha256}`);
+    }
+  } else {
+    ok('无待处理事务');
+  }
+
+  // 列出备份
+  const backups = fs.readdirSync(resourcesDir)
+    .filter(f => f.startsWith('app.asar.bak.'))
+    .sort()
+    .reverse();
+  if (backups.length > 0) {
+    info(`可用备份 (${backups.length}):`);
+    backups.forEach(b => {
+      const bp = path.join(resourcesDir, b);
+      const bs = fs.statSync(bp).size;
+      info(`  ${b} (${(bs / 1048576).toFixed(1)} MB)`);
+    });
+  } else {
+    warn('无可用备份');
+  }
+}
+
+// ======================================================================
+// 主流程
+// ======================================================================
+async function main() {
+  log(`${C.bold}${C.cyan}╔════════════════════════════════════════════╗${C.reset}`);
+  log(`${C.bold}${C.cyan}║  ZCode 哆啦A梦四时壁纸 v${PATCHER_VERSION.padEnd(10)}║${C.reset}`);
+  log(`${C.bold}${C.cyan}╚════════════════════════════════════════════╝${C.reset}`);
+
+  // ---- 模式路由 ----
+  if (process.argv.includes('--restore')) {
+    await cmdRestore();
+    return;
+  }
+  if (process.argv.includes('--check')) {
+    await cmdCheck();
+    return;
+  }
+
+  // ---- 前置检查 ----
   if (!exists(INJECT_DIR)) die('找不到 inject/ 目录，工具包不完整。');
   const cssTpl = read(path.join(INJECT_DIR, 'css.css'));
   const bodyTpl = read(path.join(INJECT_DIR, 'body.html'));
-	const jsTpl = read(path.join(INJECT_DIR, 'script.js'));
-		let engineTpl = exists(path.join(INJECT_DIR, 'theme-engine.js'))
-		  ? read(path.join(INJECT_DIR, 'theme-engine.js')) : null;
-	const panelTpl = exists(path.join(INJECT_DIR, 'theme-panel.js'))
-	  ? read(path.join(INJECT_DIR, 'theme-panel.js')) : null;
-	const switcherTpl = exists(path.join(INJECT_DIR, 'switcher.js'))
-	  ? read(path.join(INJECT_DIR, 'switcher.js')) : null;
-	const weatherTpl = exists(path.join(INJECT_DIR, 'weather.js'))
-	  ? read(path.join(INJECT_DIR, 'weather.js')) : null;
-	const rainTpl = exists(path.join(INJECT_DIR, 'rain-effect.js'))
-	  ? read(path.join(INJECT_DIR, 'rain-effect.js')) : null;
-	const settingsTpl = exists(path.join(INJECT_DIR, 'settings.js'))
-	  ? read(path.join(INJECT_DIR, 'settings.js')) : null;
-  // 双套壁纸矩阵：clear/ + rain/ 各 4 张
-  // —— 模式：--refresh-only（仅重新生成 registry.js，不重打包）——
+  const jsTpl = read(path.join(INJECT_DIR, 'script.js'));
+  let engineTpl = exists(path.join(INJECT_DIR, 'theme-engine.js'))
+    ? read(path.join(INJECT_DIR, 'theme-engine.js')) : null;
+  const panelTpl = exists(path.join(INJECT_DIR, 'theme-panel.js'))
+    ? read(path.join(INJECT_DIR, 'theme-panel.js')) : null;
+  const switcherTpl = exists(path.join(INJECT_DIR, 'switcher.js'))
+    ? read(path.join(INJECT_DIR, 'switcher.js')) : null;
+  const weatherTpl = exists(path.join(INJECT_DIR, 'weather.js'))
+    ? read(path.join(INJECT_DIR, 'weather.js')) : null;
+  const rainTpl = exists(path.join(INJECT_DIR, 'rain-effect.js'))
+    ? read(path.join(INJECT_DIR, 'rain-effect.js')) : null;
+  const settingsTpl = exists(path.join(INJECT_DIR, 'settings.js'))
+    ? read(path.join(INJECT_DIR, 'settings.js')) : null;
+
+  const wpFiles = ['doraemon-morning.png', 'doraemon-day.png', 'doraemon-dusk.png', 'doraemon-night.png'];
+  const wpDirs = ['clear', 'rain'];
+
+  // --refresh-only 模式
   if (process.argv.includes('--refresh-only')) {
-    log(`${C.bold}${C.cyan}registry.js 刷新模式${C.reset}`);
     const zcodeDir = findZCodeDir();
     if (!zcodeDir) die('找不到 ZCode 安装目录。');
     const td = path.join(zcodeDir, 'resources', 'themes');
@@ -252,12 +544,10 @@ async function main() {
     log(`${C.green}完成！重启 ZCode 后新主题即可被发现。${C.reset}`);
     process.exit(0);
   }
-  // —— 模式：--refresh-theme-fallback（仅更新 FALLBACK + registry.js，不复制壁纸）——
+
   const refreshFallbackOnly = process.argv.includes('--refresh-theme-fallback');
 
-  // 壁纸文件检查（--refresh-theme-fallback 模式跳过）
-  const wpFiles = ['doraemon-morning.png', 'doraemon-day.png', 'doraemon-dusk.png', 'doraemon-night.png'];
-  const wpDirs = ['clear', 'rain'];
+  // 壁纸文件检查
   for (const d of wpDirs) {
     for (const f of wpFiles) {
       if (!refreshFallbackOnly && !exists(path.join(WALLPAPER_SRC, d, f))) {
@@ -266,31 +556,7 @@ async function main() {
     }
   }
 
-  // —— 辅助函数：生成 registry.js（供运行时动态加载，不依赖 XHR）——
-  function generateRegistryJs(themesDirParam) {
-    try {
-      const rp = path.join(themesDirParam, '_registry.json');
-      if (!exists(rp)) { warn('_registry.json 不存在，跳过 registry.js 生成'); return; }
-      const r = JSON.parse(read(rp));
-      const extThemes = { __default__: r.default || 'doraemon' };
-      for (const tid of (r.themes || [])) {
-        try {
-          const tp = path.join(themesDirParam, tid, 'theme.json');
-          if (exists(tp)) {
-            const tj = JSON.parse(read(tp));
-            extThemes[tj.id] = tj;
-          }
-        } catch (e2) { /* skip broken themes */ }
-      }
-      const jsContent = 'window.__DW_EXTERNAL_THEMES__ = ' + JSON.stringify(extThemes, null, 2) + ';\n';
-      const rjPath = path.join(themesDirParam, 'registry.js');
-      fs.writeFileSync(rjPath, jsContent, 'utf8');
-      ok(`registry.js 已更新（${Object.keys(extThemes).filter(k => k !== '__default__').length} 个主题）`);
-      return extThemes;
-    } catch (e) { warn('registry.js 生成失败: ' + e.message); return null; }
-  }
-
-  // 1) 定位 ZCode
+  // ---- 1) 定位 ZCode ----
   step('1/6  定位 ZCode 安装目录');
   const zcodeDir = findZCodeDir();
   if (!zcodeDir) {
@@ -301,7 +567,28 @@ async function main() {
   if (!exists(asarPath)) die(`找不到 app.asar：${asarPath}`);
   ok(`ZCode 目录：${zcodeDir}`);
 
-  // 2) 检测 ZCode 是否在运行
+  // ---- 1b) 宿主版本指纹 ----
+  step('1b/6  宿主版本检查');
+  const zcodeVersion = detectZCodeVersion(zcodeDir);
+  if (zcodeVersion) info(`ZCode 版本: ${zcodeVersion}`);
+  else warn('无法检测 ZCode 版本');
+
+  if (COMPATIBLE_ZCODE_VERSIONS.length > 0) {
+    if (!zcodeVersion || !COMPATIBLE_ZCODE_VERSIONS.includes(zcodeVersion)) {
+      die(`当前 ZCode 版本 "${zcodeVersion || 'unknown'}" 不在兼容白名单中。\n` +
+        `本次未修改任何文件。如确认兼容，请更新 COMPATIBLE_ZCODE_VERSIONS。`);
+    }
+    ok(`版本 ${zcodeVersion} 在白名单中`);
+  } else {
+    info('兼容白名单未设置，信任所有版本');
+  }
+
+  // 计算原始 asar 的 SHA-256
+  info('计算原始 app.asar SHA-256...');
+  const origAsarSha256 = sha256Sync(asarPath);
+  info(`原始 asar SHA-256: ${origAsarSha256}`);
+
+  // ---- 2) 检测 ZCode 进程 ----
   step('2/6  检测 ZCode 进程');
   const forceInstall = process.argv.includes('--force');
   let running = false;
@@ -310,146 +597,147 @@ async function main() {
     running = /ZCode\.exe/i.test(out);
   } catch {}
   if (running && !forceInstall) {
-    console.error(`${C.red}✗ 检测到 ZCode 正在运行。${C.reset}`);
-    console.error(`${C.red}✗ 请完全退出 ZCode（任务栏右下角图标 → 右键 → 退出）后再运行本脚本。${C.reset}`);
-    console.error(`${C.red}✗ 对运行中宿主文件进行非原子覆盖存在损坏风险。${C.reset}`);
-    console.error(`${C.yellow}提示：如需强制继续，请运行 node apply.js --force${C.reset}`);
-    process.exit(2);
+    die('检测到 ZCode 正在运行。请完全退出 ZCode 后再运行。\n如需强制，使用 --force（有损坏风险）。');
   }
   if (running && forceInstall) {
-    warn('ZCode 正在运行，--force 模式：将尝试覆盖 app.asar（如有旧备份可回滚）');
+    warn('ZCode 正在运行，--force 模式：风险自担');
   } else if (!running) {
-    ok('ZCode 未运行，可直接替换。');
+    ok('ZCode 未运行');
   }
 
-  // 3) 解包 app.asar 到临时目录
+  // ---- 事务开始 ----
+  const txId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  saveTransaction(resourcesDir, {
+    id: txId,
+    patcherVersion: PATCHER_VERSION,
+    buildTime: new Date().toISOString(),
+    zcodeDir: zcodeDir,
+    origAsarSha256: origAsarSha256,
+    status: 'extracting',
+  });
+
+  // ---- 3) 解包 ----
   step('3/6  解包 app.asar');
   const workDir = path.join(os.tmpdir(), 'zcode-wp-work-' + Date.now());
   rmrf(workDir);
   fs.mkdirSync(workDir, { recursive: true });
-  info(`解包到临时目录（约需 2-3 分钟，请耐心等待，勿关闭窗口）...`);
+  info('解包到临时目录...');
   const t0 = Date.now();
   const er = asarExtract(asarPath, workDir);
   if (!er.ok) {
-    rmrf(workDir);
+    rmrf(workDir); clearTransaction(resourcesDir);
     die('解包失败：' + er.error);
   }
   info(`解包耗时 ${((Date.now() - t0) / 1000).toFixed(1)} 秒`);
   const idxPath = path.join(workDir, 'out', 'renderer', 'index.html');
-  if (!exists(idxPath)) { rmrf(workDir); die(`解包后找不到 out/renderer/index.html，路径结构可能已变化。`); }
+  if (!exists(idxPath)) { rmrf(workDir); clearTransaction(resourcesDir); die('解包后找不到 out/renderer/index.html'); }
   ok('解包完成');
 
-  // 3b) 同步内置主题到外部目录 + 构造 BASE token
+  // 计算原始 index.html SHA-256
+  const origIndexSha256 = sha256Sync(idxPath);
+
+  // 检查结构锚点
+  const origHtml = read(idxPath);
+  for (const anchor of REQUIRED_ANCHORS) {
+    if (!origHtml.includes(anchor)) {
+      rmrf(workDir); clearTransaction(resourcesDir);
+      die(`结构锚点 "${anchor}" 未找到，index.html 结构可能已变化。`);
+    }
+  }
+  ok('结构锚点检查通过');
+
+  // 更新事务
+  saveTransaction(resourcesDir, {
+    id: txId,
+    patcherVersion: PATCHER_VERSION,
+    buildTime: new Date().toISOString(),
+    zcodeDir: zcodeDir,
+    origAsarSha256: origAsarSha256,
+    origIndexSha256: origIndexSha256,
+    status: 'injecting',
+  });
+
+  // ---- 3b) 同步内置主题 ----
   const themesDir = path.join(resourcesDir, 'themes');
-  
-  // —— syncBundledThemes: 将项目内置主题同步到 ZCode resources/themes/
   function syncBundledThemes(srcDir, destDir) {
-    const BUNDLED = ['doraemon']; // 安装器管理的主题（用户主题不会被覆盖）
+    const BUNDLED = ['doraemon'];
     fs.mkdirSync(destDir, { recursive: true });
-    
-    // 读取现有注册表（保护用户自建主题）
     let existing = [];
     const regPath = path.join(destDir, '_registry.json');
     if (exists(regPath)) { try { existing = JSON.parse(read(regPath)).themes || []; } catch(e){} }
-    
-    // 复制/更新内置主题
     for (const id of BUNDLED) {
       const src = path.join(srcDir, id), dest = path.join(destDir, id);
       if (!exists(src)) { warn(`内置主题 ${id} 源目录缺失`); continue; }
       rmrf(dest); fs.cpSync(src, dest, { recursive: true });
-      info(`内置主题 ${id} → 已同步`);
     }
-    
-    // 合并主题列表（内置 + 用户）并校验
     const all = [...new Set([...BUNDLED, ...existing.filter(t => !BUNDLED.includes(t))])];
     const valid = [];
     for (const id of all) {
       const d = path.join(destDir, id);
       if (!exists(d)) continue;
       const tj = path.join(d, 'theme.json');
-      if (!exists(tj)) { warn(`主题 ${id} 缺少 theme.json`); continue; }
+      if (!exists(tj)) continue;
       try {
         const t = JSON.parse(read(tj));
-        if (!t.id || !t.name || !t.type) { warn(`主题 ${id} theme.json 缺字段`); continue; }
+        if (!t.id || !t.name || !t.type) continue;
         valid.push(id);
-      } catch(e) { warn(`主题 ${id} theme.json 解析失败`); }
+      } catch(e) {}
     }
     const def = valid.includes('doraemon') ? 'doraemon' : (valid[0] || 'doraemon');
     fs.writeFileSync(regPath, JSON.stringify({ themes: valid, default: def }, null, 2));
-    ok(`_registry.json 已更新（${valid.length} 个主题，默认: ${def}）`);
     return valid;
   }
-  
-  // 执行同步（项目 themes/ → ZCode resources/themes/）
+
   step('3c/6  部署内置主题');
   const projectThemes = path.join(SCRIPT_DIR, 'themes');
   syncBundledThemes(projectThemes, themesDir);
-  
-  // 构造 file:// URL
   const themesBaseUrl = 'file:///' + themesDir.replace(/\\/g, '/') + '/';
-  // 读取所有外置主题的元数据作为兜底（即使 XHR 被 Electron 拦截也能切换）
   let fallbackThemes = { __default__: 'doraemon' };
   try {
-    // 从 _registry.json 获取所有已注册主题
     const regPath = path.join(themesDir, '_registry.json');
     if (exists(regPath)) {
       const reg = JSON.parse(read(regPath));
-      const ids = reg.themes || [];
-      for (const id of ids) {
+      for (const id of (reg.themes || [])) {
         try {
           const themePath = path.join(themesDir, id, 'theme.json');
           if (exists(themePath)) {
             const themeJson = JSON.parse(read(themePath));
             fallbackThemes[themeJson.id] = themeJson;
           }
-        } catch (e) { /* 单个主题加载失败不阻断整体 */ }
+        } catch (e) {}
       }
-      if (!fallbackThemes.__default__ || !fallbackThemes[fallbackThemes.__default__]) {
-        fallbackThemes.__default__ = reg.default || ids[0] || 'doraemon';
-      }
+      fallbackThemes.__default__ = reg.default || 'doraemon';
     }
-  } catch (e) { warn('兜底主题读取失败，使用最小配置'); }
-  // 确保至少 doraemon 存在
-  if (!fallbackThemes.doraemon) {
-    try {
-      const doraTheme = read(path.join(themesDir, 'doraemon', 'theme.json'));
-      fallbackThemes[JSON.parse(doraTheme).id] = JSON.parse(doraTheme);
-    } catch (e2) { /* 忽略 */ }
-  }
-  // ★ 生成 registry.js（运行时动态加载的首选来源）
+  } catch (e) { warn('兜底主题读取失败'); }
   generateRegistryJs(themesDir);
-  // 替换 engineTpl 中的占位符
   if (engineTpl) {
     engineTpl = engineTpl.replace('__BASE_TOKEN__', JSON.stringify(themesBaseUrl));
     engineTpl = engineTpl.replace('__FALLBACK_TOKEN__', JSON.stringify(fallbackThemes));
   }
 
-  // 4) 幂等注入 index.html
+  // ---- 4) 注入 ----
   step('4/6  注入壁纸机制（幂等）');
   let html = read(idxPath);
   let changed = false;
 
-		  // 4-0) 清理 v1.0 遗留（无标记的手工注入内容），避免升级到 v2.0 时重复
-		  //      v1.0 特征：含 #doraemon-wallpaper 但无 ZCODE-WALLPAPER-INJECT 标记
-		  if (html.includes('#doraemon-wallpaper') && !html.includes('ZCODE-WALLPAPER-INJECT')) {
-		    info('检测到 v1.0 遗留注入，正在清理...');
-		    html = stripV1Legacy(html);
-		    changed = true;
-		    ok('v1.0 遗留已清理');
-		  }
+  // 清理 v1.0
+  if (html.includes('#doraemon-wallpaper') && !html.includes('ZCODE-WALLPAPER-INJECT')) {
+    info('检测到 v1.0 遗留注入，正在清理...');
+    html = stripV1Legacy(html);
+    changed = true;
+    ok('v1.0 遗留已清理');
+  }
 
-		  // 4-0c) 清理未标记的旧主题引擎代码（残留的 <script> 含 __DW_THEMES_BASE__ 且不在 ENGINE_MARK 内）
-		  const staleEngineRe = /<script>\s*\/\/\s*=+\s*主题引擎[\s\S]*?var\s+(?:__DW_THEMES_BASE__|BASE\s*=\s*typeof\s+__DW_THEMES_BASE__)[\s\S]*?<\/script>/gi;
-		  const staleCount = (html.match(staleEngineRe) || []).length;
-		  if (staleCount > 0 && html.includes(ENGINE_MARK_BEGIN)) {
-		    // 只有在已有 ENGINE_MARK 块时才清理（说明新版已注入，旧版应移除）
-		    info(`清理 ${staleCount} 个残留旧主题引擎块...`);
-		    html = html.replace(staleEngineRe, '');
-		    changed = true;
+  // 清理残留旧引擎
+  const staleEngineRe = /<script>\s*\/\/\s*=+\s*主题引擎[\s\S]*?var\s+(?:__DW_THEMES_BASE__|BASE\s*=\s*typeof\s+__DW_THEMES_BASE__)[\s\S]*?<\/script>/gi;
+  if ((html.match(staleEngineRe) || []).length > 0 && html.includes(ENGINE_MARK_BEGIN)) {
+    info('清理残留旧主题引擎块...');
+    html = html.replace(staleEngineRe, '');
+    changed = true;
     ok('旧主题引擎已清理');
   }
 
-  // 清理残留的旧标记块（THEMEENGINE / THEMEPANEL — 来自早期版本的命名不一致）
+  // 清理旧标记
   const staleMarkerNames = ['THEMEENGINE', 'THEMEPANEL'];
   for (const sm of staleMarkerNames) {
     const sBegin = '<!-- >>> ZCODE-WALLPAPER-' + sm + ' BEGIN >>> -->';
@@ -457,143 +745,57 @@ async function main() {
     if (html.includes(sBegin) && html.includes(sEnd)) {
       const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const re = new RegExp(esc(sBegin) + '[\\s\\S]*?' + esc(sEnd), 'g');
-      const count = (html.match(re) || []).length;
       html = html.replace(re, '');
-      info(`清理 ${count} 个残留「${sm}」标记块`);
+      info(`清理残留「${sm}」标记块`);
       changed = true;
     }
   }
 
-	  // 4-0b) 修复历史损坏：<head> 被截断
-	  const beforeRepair = html.slice(0, Math.min(100, html.length));
-	  html = repairBrokenHead(html);
-	  if (html.slice(0, Math.min(100, html.length)) !== beforeRepair) {
-	    info('检测到 <head> 损坏，已修复');
-	    changed = true;
-	  }
+  // 修复 head
+  html = repairBrokenHead(html);
 
-
-  // 4a) CSS：注入到第一个 </style> 之前
+  // CSS
   const cssBlock = `${MARK_BEGIN}\n${cssTpl}${MARK_END}`;
   const cssReplaced = replaceBlock(html, MARK_BEGIN, MARK_END, cssTpl);
-  if (cssReplaced !== null) {
-    html = cssReplaced; info('CSS 块已更新（替换旧块）');
-  } else if (/<\/style>/.test(html)) {
-    html = html.replace(/<\/style>/, cssBlock + '\n    </style>');
-    info('CSS 块已插入'); changed = true;
-  } else {
-    warn('未找到 </style>，跳过 CSS 注入');
-  }
+  if (cssReplaced !== null) { html = cssReplaced; info('CSS 块已更新'); }
+  else if (/<\/style>/.test(html)) { html = html.replace(/<\/style>/, cssBlock + '\n    </style>'); info('CSS 块已插入'); changed = true; }
 
-	  // 4b) body 壁纸层：注入到 </body> 之前（不插在 #root 前，避免影响布局）
-	  const bodyBlock = `${BODY_MARK_BEGIN}\n${bodyTpl}${BODY_MARK_END}`;
-	  const bodyReplaced = replaceBlock(html, BODY_MARK_BEGIN, BODY_MARK_END, bodyTpl);
-	  if (bodyReplaced !== null) {
-	    html = bodyReplaced; info('壁纸层已更新（替换旧块）');
-	  } else if (/<\/body>/.test(html)) {
-	    html = html.replace(/<\/body>/, bodyBlock + '\n  </body>');
-	    info('壁纸层已插入'); changed = true;
-	  } else {
-	    warn('未找到 </body>，跳过壁纸层注入');
-	  }
+  // body
+  const bodyBlock = `${BODY_MARK_BEGIN}\n${bodyTpl}${BODY_MARK_END}`;
+  const bodyReplaced = replaceBlock(html, BODY_MARK_BEGIN, BODY_MARK_END, bodyTpl);
+  if (bodyReplaced !== null) { html = bodyReplaced; info('壁纸层已更新'); }
+  else if (/<\/body>/.test(html)) { html = html.replace(/<\/body>/, bodyBlock + '\n  </body>'); info('壁纸层已插入'); changed = true; }
 
-  // 4c) JS：注入到 </body> 之前
+  // JS
   const jsBlock = `${SCRIPT_MARK_BEGIN}\n${jsTpl}${SCRIPT_MARK_END}`;
   const jsReplaced = replaceBlock(html, SCRIPT_MARK_BEGIN, SCRIPT_MARK_END, jsTpl);
-  if (jsReplaced !== null) {
-    html = jsReplaced; info('切换脚本已更新（替换旧块）');
-  } else if (/<\/body>/.test(html)) {
-    html = html.replace(/<\/body>/, jsBlock + '\n  </body>');
-    info('切换脚本已插入'); changed = true;
-  } else {
-    warn('未找到 </body>，跳过脚本注入');
+  if (jsReplaced !== null) { html = jsReplaced; info('切换脚本已更新'); }
+  else if (/<\/body>/.test(html)) { html = html.replace(/<\/body>/, jsBlock + '\n  </body>'); info('切换脚本已插入'); changed = true; }
+
+  // 其余模块
+  const modules = [
+    { tpl: switcherTpl, begin: SWITCHER_MARK_BEGIN, end: SWITCHER_MARK_END, name: '手动开关' },
+    { tpl: weatherTpl, begin: WEATHER_MARK_BEGIN, end: WEATHER_MARK_END, name: '自动天气检测' },
+    { tpl: engineTpl, begin: ENGINE_MARK_BEGIN, end: ENGINE_MARK_END, name: '主题引擎' },
+    { tpl: panelTpl, begin: PANEL_MARK_BEGIN, end: PANEL_MARK_END, name: '主题面板' },
+    { tpl: rainTpl, begin: RAIN_MARK_BEGIN, end: RAIN_MARK_END, name: '下雨动效' },
+    { tpl: settingsTpl, begin: SETTINGS_MARK_BEGIN, end: SETTINGS_MARK_END, name: '天气配置面板' },
+  ];
+  for (const mod of modules) {
+    if (!mod.tpl) continue;
+    const block = `${mod.begin}\n${mod.tpl}${mod.end}`;
+    const replaced = replaceBlock(html, mod.begin, mod.end, mod.tpl);
+    if (replaced !== null) { html = replaced; info(`${mod.name}已更新`); }
+    else if (/<\/body>/.test(html)) { html = html.replace(/<\/body>/, block + '\n  </body>'); info(`${mod.name}已插入`); changed = true; }
   }
 
-  // 4d) switcher.js（手动开关）：同样注入到 </body> 之前，紧挨主脚本之后
-  let switcherReplaced = null;
-  if (switcherTpl) {
-    const switcherBlock = `${SWITCHER_MARK_BEGIN}\n${switcherTpl}${SWITCHER_MARK_END}`;
-    switcherReplaced = replaceBlock(html, SWITCHER_MARK_BEGIN, SWITCHER_MARK_END, switcherTpl);
-    if (switcherReplaced !== null) {
-      html = switcherReplaced; info('手动开关已更新（替换旧块）');
-    } else if (/<\/body>/.test(html)) {
-      html = html.replace(/<\/body>/, switcherBlock + '\n  </body>');
-      info('手动开关已插入'); changed = true;
-    }
-  }
-
-  // 4d-bis) weather.js（open-meteo 自动检测）：注入到 </body> 之前，最后加载
-  let weatherReplaced = null;
-  if (weatherTpl) {
-    const weatherBlock = `${WEATHER_MARK_BEGIN}\n${weatherTpl}${WEATHER_MARK_END}`;
-    weatherReplaced = replaceBlock(html, WEATHER_MARK_BEGIN, WEATHER_MARK_END, weatherTpl);
-    if (weatherReplaced !== null) {
-      html = weatherReplaced; info('自动天气检测已更新（替换旧块）');
-    } else if (/<\/body>/.test(html)) {
-      html = html.replace(/<\/body>/, weatherBlock + '\n  </body>');
-	      info('自动天气检测已插入'); changed = true;
-	    }
-	  }
-
-	  // 4d-ter) theme-engine.js（主题引擎：外部主题加载、切换、渲染）
-	  let engineReplaced = null;
-	  if (engineTpl) {
-	    const engineBlock = `${ENGINE_MARK_BEGIN}\n${engineTpl}${ENGINE_MARK_END}`;
-	    engineReplaced = replaceBlock(html, ENGINE_MARK_BEGIN, ENGINE_MARK_END, engineTpl);
-	    if (engineReplaced !== null) {
-	      html = engineReplaced; info('主题引擎已更新（替换旧块）');
-	    } else if (/<\/body>/.test(html)) {
-	      html = html.replace(/<\/body>/, engineBlock + '\n  </body>');
-	      info('主题引擎已插入'); changed = true;
-	    }
-	  }
-
-	  // 4d-quater) theme-panel.js（主题管理面板 Ctrl+Shift+W）
-	  let panelReplaced = null;
-	  if (panelTpl) {
-	    const panelBlock = `${PANEL_MARK_BEGIN}\n${panelTpl}${PANEL_MARK_END}`;
-	    panelReplaced = replaceBlock(html, PANEL_MARK_BEGIN, PANEL_MARK_END, panelTpl);
-	    if (panelReplaced !== null) {
-	      html = panelReplaced; info('主题面板已更新（替换旧块）');
-	    } else if (/<\/body>/.test(html)) {
-	      html = html.replace(/<\/body>/, panelBlock + '\n  </body>');
-	      info('主题面板已插入'); changed = true;
-	    }
-	  }
-
-	  // 4d-quin) rain-effect.js（下雨 Canvas 动效）
-	  let rainReplaced = null;
-	  if (rainTpl) {
-	    const rainBlock = `${RAIN_MARK_BEGIN}\n${rainTpl}${RAIN_MARK_END}`;
-	    rainReplaced = replaceBlock(html, RAIN_MARK_BEGIN, RAIN_MARK_END, rainTpl);
-	    if (rainReplaced !== null) {
-	      html = rainReplaced; info('下雨动效已更新（替换旧块）');
-	    } else if (/<\/body>/.test(html)) {
-	      html = html.replace(/<\/body>/, rainBlock + '\n  </body>');
-	      info('下雨动效已插入'); changed = true;
-	    }
-	  }
-
-	  // 4d-sex) settings.js（天气配置面板 Ctrl+Shift+S）
-	  let settingsReplaced = null;
-	  if (settingsTpl) {
-	    const settingsBlock = `${SETTINGS_MARK_BEGIN}\n${settingsTpl}${SETTINGS_MARK_END}`;
-	    settingsReplaced = replaceBlock(html, SETTINGS_MARK_BEGIN, SETTINGS_MARK_END, settingsTpl);
-	    if (settingsReplaced !== null) {
-	      html = settingsReplaced; info('天气配置面板已更新（替换旧块）');
-	    } else if (/<\/body>/.test(html)) {
-	      html = html.replace(/<\/body>/, settingsBlock + '\n  </body>');
-	      info('天气配置面板已插入'); changed = true;
-	    }
-	  }
-
-	  if (!changed && cssReplaced === null && bodyReplaced === null && jsReplaced === null && switcherReplaced === null && weatherReplaced === null && engineReplaced === null && panelReplaced === null && rainReplaced === null && settingsReplaced === null) {
-    warn('未发现可注入位置，index.html 结构可能已变化，请检查。');
+  if (!changed && cssReplaced === null && bodyReplaced === null && jsReplaced === null) {
+    warn('未发现可注入位置，index.html 结构可能已变化。');
   }
   fs.writeFileSync(idxPath, html, 'utf8');
   ok('index.html 注入完成');
 
-  // 4e) 复制壁纸（双套矩阵 clear/ + rain/）— --refresh-theme-fallback 时跳过
+  // 复制壁纸
   let wpDest = null;
   if (!refreshFallbackOnly) {
     wpDest = path.join(workDir, 'out', 'renderer', 'wallpapers');
@@ -608,130 +810,141 @@ async function main() {
         copied++;
       }
     }
-    ok(`已复制 ${copied} 张壁纸（晴/雨各 ${wpFiles.length} 张）`);
-  } else {
-    ok('--refresh-theme-fallback 模式：跳过壁纸复制');
-  }
-
-  // 4f) 复制 weather-config.json
-  if (!refreshFallbackOnly) {
+    ok(`已复制 ${copied} 张壁纸`);
+    // weather-config.json
     const cfgSrc = path.join(SCRIPT_DIR, 'weather-config.json');
-    if (exists(cfgSrc)) {
-      fs.copyFileSync(cfgSrc, path.join(wpDest, 'weather-config.json'));
-      ok('已复制 weather-config.json（v3.0 预留）');
-    }
+    if (exists(cfgSrc)) fs.copyFileSync(cfgSrc, path.join(wpDest, 'weather-config.json'));
   }
 
-  // 5) 重新打包
-  step('5/6  重新打包 app.asar（约需 1-3 分钟，请耐心等待）');
+  // ---- 更新事务 ----
+  saveTransaction(resourcesDir, {
+    id: txId,
+    patcherVersion: PATCHER_VERSION,
+    buildTime: new Date().toISOString(),
+    zcodeDir: zcodeDir,
+    origAsarSha256: origAsarSha256,
+    origIndexSha256: origIndexSha256,
+    status: 'packing',
+  });
+
+  // ---- 5) 打包 ----
+  step('5/6  重新打包 app.asar');
   const newAsar = path.join(os.tmpdir(), 'app.asar.new-' + Date.now());
   rmrf(newAsar);
   info('打包中...');
   const t1 = Date.now();
   const pr = await asarPack(workDir, newAsar);
   if (!pr.ok || !exists(newAsar)) {
-    rmrf(workDir); rmrf(newAsar);
+    rmrf(workDir); rmrf(newAsar); clearTransaction(resourcesDir);
     die('打包失败：' + (pr.error || '未知错误'));
   }
-  ok(`打包完成：${(fs.statSync(newAsar).size / 1048576).toFixed(1)} MB，耗时 ${((Date.now() - t1) / 1000).toFixed(1)} 秒`);
+  const newAsarSize = fs.statSync(newAsar).size;
+  ok(`打包完成：${(newAsarSize / 1048576).toFixed(1)} MB，耗时 ${((Date.now() - t1) / 1000).toFixed(1)} 秒`);
 
-  // 5b) 完整性校验：检查打包源 workDir + 最终 ASAR
-  step('5b/6  校验完整性');
+  // ---- 5b) 校验打包源目录 ----
+  step('5b/6  源目录校验');
   const vHtml = read(idxPath);
-	  const needMarks = [MARK_BEGIN, BODY_MARK_BEGIN, SCRIPT_MARK_BEGIN, SWITCHER_MARK_BEGIN, WEATHER_MARK_BEGIN, ENGINE_MARK_BEGIN, PANEL_MARK_BEGIN, RAIN_MARK_BEGIN, SETTINGS_MARK_BEGIN];
+  const needMarks = [MARK_BEGIN, BODY_MARK_BEGIN, SCRIPT_MARK_BEGIN, SWITCHER_MARK_BEGIN,
+    WEATHER_MARK_BEGIN, ENGINE_MARK_BEGIN, PANEL_MARK_BEGIN, RAIN_MARK_BEGIN, SETTINGS_MARK_BEGIN];
   const missing = needMarks.filter(m => !vHtml.includes(m));
-	  if (missing.length > 0) {
-	    rmrf(workDir); rmrf(newAsar);
-	    die('完整性校验失败：缺少注入标记 ' + missing.join(', ') + '，已中止替换（线上未受影响）。');
-	  }
-	  // 检查 HTML 文档结构完好
-	  const vTrimmed = vHtml.trimStart();
-	  if (!/^<!DOCTYPE/i.test(vTrimmed) && !/^<html/i.test(vTrimmed)) {
-	    rmrf(workDir); rmrf(newAsar);
-	    die('完整性校验失败：HTML 文档开头损坏（应始于 <!DOCTYPE 或 <html），已中止替换。请尝试从备份恢复。');
-	  }
-  // 壁纸数量（--refresh-theme-fallback 跳过）
-  let wpCount = -1;
-  if (!refreshFallbackOnly) {
-    wpCount = 0;
-    for (const d of wpDirs) {
-      for (const f of wpFiles) {
-        if (exists(path.join(wpDest, d, f))) wpCount++;
-      }
-    }
-    if (wpCount < wpDirs.length * wpFiles.length) {
-      rmrf(workDir); rmrf(newAsar);
-      die(`完整性校验失败：壁纸不足（${wpCount}/${wpDirs.length * wpFiles.length}），已中止替换。`);
-    }
+  if (missing.length > 0) {
+    rmrf(workDir); rmrf(newAsar); clearTransaction(resourcesDir);
+    die('源目录校验失败：缺少注入标记 ' + missing.join(', '));
   }
-  ok(`源目录校验通过（${needMarks.length} 标记` + (wpCount >= 0 ? ` + ${wpCount} 壁纸` : '') + `齐全）`);
+  ok('源目录标记齐全');
 
-  // 5c) 校验最终 ASAR 包可读且内容一致
-  step('5c/6  校验最终 ASAR 包');
-  try {
-    const lib = loadAsar();
-    if (!lib) { warn('ASAR 库不可用，跳过最终包校验'); }
-    else {
-      // 从 ASAR 中提取 index.html 并验证标记
-      const extractDir = path.join(os.tmpdir(), 'zcode-wp-verify-' + Date.now());
-      rmrf(extractDir);
-      fs.mkdirSync(extractDir, { recursive: true });
-      lib.extractAll(newAsar, extractDir);
-      const extractedHtml = read(path.join(extractDir, 'out', 'renderer', 'index.html'));
-      const verifyMissing = needMarks.filter(m => !extractedHtml.includes(m));
-      if (verifyMissing.length > 0) {
-        rmrf(extractDir); rmrf(workDir); rmrf(newAsar);
-        die(`最终 ASAR 校验失败：缺少标记 ${verifyMissing.join(', ')}，打包可能不完整。`);
-      }
-      rmrf(extractDir);
-      ok(`最终 ASAR 验证通过（${needMarks.length} 标记齐全）`);
-    }
-  } catch (verr) {
-    rmrf(workDir); rmrf(newAsar);
-    die(`最终 ASAR 校验异常：${verr.message}`);
+  // ---- 5c) 最终包验证（重新解包检查） ----
+  step('5c/6  最终包验证（重新解包）');
+  const expectedWpCount = refreshFallbackOnly ? 0 : wpDirs.length * wpFiles.length;
+  const verifyResult = await verifyFinalAsar(newAsar, needMarks, expectedWpCount);
+  if (!verifyResult.ok) {
+    rmrf(workDir); rmrf(newAsar); clearTransaction(resourcesDir);
+    die('最终包验证失败：' + verifyResult.error);
   }
+  ok(`最终包验证通过 (${verifyResult.markCount} 标记 + ${verifyResult.wpCount} 壁纸)`);
+  info(`新 asar SHA-256: ${verifyResult.sha256}`);
 
-  // 6) 备份 + 原子替换
+  // ---- 6) 备份 + 原子替换 ----
   step('6/6  备份原文件并原子替换');
   const ts = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
   const bakPath = path.join(resourcesDir, `app.asar.bak.${ts}`);
-  try { fs.copyFileSync(asarPath, bakPath); ok(`已备份原版：${path.basename(bakPath)}`); }
-  catch (e) { rmrf(workDir); rmrf(newAsar); die(`备份失败：${e.message}`); }
-  
-  // 原子替换：先写到同目录临时文件，再 rename（rename 比 copy 更接近原子操作）
+
+  // 备份并验证
+  try {
+    fs.copyFileSync(asarPath, bakPath);
+    const bakHash = sha256Sync(bakPath);
+    if (bakHash !== origAsarSha256) {
+      // 备份验证失败，尝试重新备份
+      warn('备份 SHA-256 不匹配，重新备份...');
+      fs.unlinkSync(bakPath);
+      fs.copyFileSync(asarPath, bakPath);
+    }
+    ok(`已备份原版: ${path.basename(bakPath)}`);
+  } catch (e) {
+    rmrf(workDir); rmrf(newAsar); clearTransaction(resourcesDir);
+    die('备份失败：' + e.message);
+  }
+
+  // 原子替换：只使用 renameSync，不降级到 copyFileSync
+  // 若 rename 失败（如文件被占用），直接报错退出，不破坏原文件
   const tmpPath = asarPath + '.tmp-' + Date.now();
   try {
     fs.copyFileSync(newAsar, tmpPath);
     const tmpSize = fs.statSync(tmpPath).size;
-    const newSize = fs.statSync(newAsar).size;
-    if (tmpSize !== newSize) throw new Error(`临时文件大小不匹配 (${tmpSize} vs ${newSize})`);
-    // 原子 rename（如被占用则明确报错，不允许非原子覆盖）
-    try { fs.renameSync(tmpPath, asarPath); ok('已原子替换 app.asar'); }
-    catch (rErr) {
-      try { if (exists(tmpPath)) fs.unlinkSync(tmpPath); } catch(_) {}
-      if (rErr.code === 'EPERM' || rErr.code === 'EBUSY') {
-        die(`app.asar 被占用（${rErr.code}），请完全退出 ZCode 后重试。`);
-      } else throw rErr;
-    }
+    if (tmpSize !== newAsarSize) throw new Error(`临时文件大小不匹配 (${tmpSize} vs ${newAsarSize})`);
+
+    // SHA-256 验证临时文件
+    const tmpHash = sha256Sync(tmpPath);
+    if (tmpHash !== verifyResult.sha256) throw new Error('临时文件 SHA-256 不匹配');
+
+    // 原子重命名
+    fs.renameSync(tmpPath, asarPath);
+    ok('已原子替换 app.asar');
   } catch (e) {
-    try { if (exists(tmpPath)) fs.unlinkSync(tmpPath); } catch(_) {}
-    rmrf(workDir); rmrf(newAsar);
+    try { if (exists(tmpPath)) fs.unlinkSync(tmpPath); } catch {}
+    rmrf(workDir); rmrf(newAsar); clearTransaction(resourcesDir);
     die(`替换失败：${e.message}\n原文件未被破坏。`);
   }
 
-  // 清理临时文件
+  // ---- 验证替换后的文件 ----
+  try {
+    const finalHash = sha256Sync(asarPath);
+    if (finalHash !== verifyResult.sha256) {
+      // 替换后哈希不一致，尝试从备份恢复
+      warn('替换后 SHA-256 不一致，尝试从备份恢复...');
+      try {
+        fs.copyFileSync(bakPath, asarPath);
+        ok('已从备份恢复');
+      } catch (restoreErr) {
+        die(`严重：替换后文件损坏且自动恢复失败。请手动重命名 ${path.basename(bakPath)} 为 app.asar`);
+      }
+      clearTransaction(resourcesDir);
+      die('替换后完整性校验失败，已自动回滚。');
+    }
+    ok('替换后完整性通过');
+  } catch (e) {
+    warn('无法验证替换后文件: ' + e.message);
+  }
+
+  // ---- 生成构建 manifest ----
+  const manifest = generateBuildManifest(zcodeDir, zcodeVersion, origAsarSha256, verifyResult.sha256, origIndexSha256);
+  const manifestPath = path.join(resourcesDir, '.zcode-wallpaper-manifest.json');
+  try {
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+    ok('构建 manifest 已写入');
+  } catch (e) { warn('manifest 写入失败: ' + e.message); }
+
+  // ---- 清理 ----
   rmrf(workDir);
   rmrf(newAsar);
+  clearTransaction(resourcesDir);
 
   log(`\n${C.bold}${C.green}╔════════════════════════════════════════════╗${C.reset}`);
-  log(`${C.bold}${C.green}║  ✅  重装完成！                              ║${C.reset}`);
+  log(`${C.bold}${C.green}║  ✅  重装完成！                          ║${C.reset}`);
   log(`${C.bold}${C.green}╚════════════════════════════════════════════╝${C.reset}`);
-  if (running) {
-    log(`\n${C.yellow}下一步：请完全退出 ZCode 并重新打开，即可看到效果。${C.reset}`);
-  } else {
-    log(`\n${C.green}下一步：打开 ZCode 即可看到效果。${C.reset}`);
-  }
-  log(`${C.dim}回滚方法：把 ${path.basename(bakPath)} 改名为 app.asar 覆盖即可。${C.reset}`);
+  log(`\n${C.green}下一步：请完全退出 ZCode 并重新打开。${C.reset}`);
+  log(`${C.dim}回滚：node apply.js --restore latest${C.reset}`);
+  log(`${C.dim}检查：node apply.js --check${C.reset}`);
 }
 
 main().catch(e => die('意外错误：' + (e.stack || e.message)));

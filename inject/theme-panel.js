@@ -2,14 +2,7 @@
       // ============ 主题面板 v6.1（完整版 + 容错）============
       // 每个功能模块独立 try/catch，一个崩不影响整体
       (function () {
-        // ★ 可见标记
-        try {
-          var _ok = document.createElement('div');
-          _ok.id = 'dw-panel-ok';
-          _ok.style.cssText = 'position:fixed;top:0;right:0;z-index:2147483645;padding:1px 5px;background:#0a0;color:#fff;font-size:9px;opacity:0.6;pointer-events:none;border-radius:0 0 0 4px;';
-          _ok.textContent = 'PANEL v6.1';
-          document.body.appendChild(_ok);
-        } catch(_) {}
+	        // ★ 可见标记（已移除版本标签）
 
         var PANEL = null, UPLOAD_MODE = false, UPLOAD_MULTI = false;
         var _searchQuery = '', _showSettings = false;
@@ -53,14 +46,16 @@
           });
           window.__DW_THEMES__ = tgt;
         }
-        function refreshUserThemes() {
-          if (!window._dwLoadUserThemes) return Promise.resolve();
-          return window._dwLoadUserThemes().then(function (l) {
-            window.__DW_USER_THEMES__ = l;
-            registerUserThemes(l);
-            try { var sid = localStorage.getItem('dw-active-theme'); if (sid && l.some(function (t) { return t.id === sid; })) { if (window.__dwSwitchTheme) window.__dwSwitchTheme(sid); } } catch (e) { }
-          }).catch(function () { });
-        }
+	        function refreshUserThemes() {
+	          if (!window._dwLoadUserThemes) return Promise.resolve();
+	          return window._dwLoadUserThemes().then(function (l) {
+	            window.__DW_USER_THEMES__ = l;
+	            registerUserThemes(l);
+	            try { var sid = localStorage.getItem('dw-active-theme'); if (sid && l.some(function (t) { return t.id === sid; })) { if (window.__dwSwitchTheme) window.__dwSwitchTheme(sid); } } catch (e) { }
+	          }).catch(function (err) {
+	            console.warn('[DW] 用户主题加载失败:', err);
+	          });
+	        }
 
         // —— 主题列表 ——
         window.__dwListAllThemes = function () {
@@ -73,16 +68,17 @@
           var r = []; for (var k in map) r.push(map[k]); return r;
         };
 
-        // —— 主题 ID 安全校验（P1-3）——
+        // —— 缩略图系统 ——
+        // _thumbCache: id → 小缩略图 data URL（异步生成，仅用于用户上传的大 data URL）
+        // 内置/外置静态主题直接用 file:// 路径（短，CSS 直接显示，不经过 canvas 避免跨域污染）
+
+        // ★ 主题 ID 安全校验
         function validateThemeId(id) {
           if (!id || typeof id !== 'string') return false;
           if (/^(__proto__|prototype|constructor|__default__)$/.test(id)) return false;
           return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(id);
         }
 
-        // —— 缩略图系统 ——
-        // _thumbCache: id → 小缩略图 data URL（异步生成，仅用于用户上传的大 data URL）
-        // 内置/外置静态主题直接用 file:// 路径（短，CSS 直接显示，不经过 canvas 避免跨域污染）
         var _thumbCache = {};
         var _thumbPending = {};
 
@@ -521,13 +517,18 @@
                 return window._dwLoadUserThemes ? window._dwLoadUserThemes() : Promise.resolve(userList);
               }).then(function (dbList) {
                 window.__DW_USER_THEMES__ = dbList;
-              }).catch(function () { /* DB 保存失败不影响使用 */ });
+              }).catch(function (dbErr) {
+                console.warn('[DW] IndexedDB 保存失败:', dbErr);
+                toast('⚠️ 保存失败，主题可能重启后丢失');
+              });
             }
             
             // 立即切换（不等 DB）
             UPLOAD_MODE = false;
-            // 图片主题预生成缩略图缓存
-            if (!isVideo && typeof data === 'string' && data.indexOf('data:') === 0) genThumbAsync(id, data);
+            // 图片主题预生成缩略图缓存（传递正确的主题对象，而非裸 data URL）
+            if (!isVideo && typeof data === 'string' && data.indexOf('data:') === 0) {
+              genThumbAsync(id, { user: true, type: 'static', _userData: data, _userDataMime: theme._userDataMime });
+            }
             if (window.__dwSwitchTheme) window.__dwSwitchTheme(id);
             setTimeout(buildPanel, 300);
             
