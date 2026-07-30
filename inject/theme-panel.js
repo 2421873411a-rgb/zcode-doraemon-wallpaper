@@ -73,6 +73,13 @@
           var r = []; for (var k in map) r.push(map[k]); return r;
         };
 
+        // —— 主题 ID 安全校验（P1-3）——
+        function validateThemeId(id) {
+          if (!id || typeof id !== 'string') return false;
+          if (/^(__proto__|prototype|constructor|__default__)$/.test(id)) return false;
+          return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(id);
+        }
+
         // —— 缩略图系统 ——
         // _thumbCache: id → 小缩略图 data URL（异步生成，仅用于用户上传的大 data URL）
         // 内置/外置静态主题直接用 file:// 路径（短，CSS 直接显示，不经过 canvas 避免跨域污染）
@@ -440,6 +447,11 @@
                   if (!raw.length) { toast('无主题数据'); return; }
                   var decoded = [];
                   raw.forEach(function (t) {
+                    // ★ ID 安全校验：拒绝非法 ID
+                    if (!validateThemeId(t.id)) {
+                      console.warn('[DW] 跳过导入：ID 不合法「' + t.id + '」');
+                      return;
+                    }
                     if (t._userData && t._userData._encoding === 'base64' && t._userData._data) {
                       var bin = atob(t._userData._data);
                       var bytes = new Uint8Array(bin.length);
@@ -475,7 +487,7 @@
           var MAX_VIDEO = 100 * 1024 * 1024; // 100MB，避免 ArrayBuffer 内存溢出
           var MAX_IMAGE = 20 * 1024 * 1024;
           var limit = isVideo ? MAX_VIDEO : MAX_IMAGE;
-          if (file.size > limit) { toast('文件过大（最大' + (isVideo ? '200MB' : '20MB') + '），当前' + (file.size/1024/1024).toFixed(1) + 'MB'); return; }
+          if (file.size > limit) { toast('文件过大（最大' + (isVideo ? '100MB' : '20MB') + '），当前' + (file.size/1024/1024).toFixed(1) + 'MB'); return; }
           if (!isVideo && file.size > MAX_IMAGE) { toast('图片最大20MB，当前' + (file.size/1024/1024).toFixed(1) + 'MB'); return; }
           
           var id = 'user-' + Date.now();

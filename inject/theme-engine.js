@@ -111,6 +111,28 @@
           try { localStorage.setItem(STORAGE_KEY, id); } catch (e) {} return true;
         }
 
+        // ★ 统一视频素材解析：_blobUrl → _userData(ArrayBuffer) → file:// asset
+        function resolveVideoSource(theme, id) {
+          if (!theme) return null;
+          // 1) 已有 blob URL（XHR 回退或之前已转换）
+          if (theme._blobUrl) return theme._blobUrl;
+          // 2) 用户上传主题：_userData 是 ArrayBuffer（视频），需转 Blob URL
+          if (theme._userData instanceof ArrayBuffer) {
+            var mime = theme._userDataMime || 'video/mp4';
+            var blob = new Blob([theme._userData], { type: mime });
+            var blobUrl = URL.createObjectURL(blob);
+            theme._blobUrl = blobUrl;
+            // 同步回所有引用
+            if (window.__DW_THEMES__ && window.__DW_THEMES__[id]) window.__DW_THEMES__[id]._blobUrl = blobUrl;
+            if (_themes && _themes[id]) _themes[id]._blobUrl = blobUrl;
+            console.log('[DW] ✅ 用户视频 _userData → Blob URL: ' + blobUrl.substring(0, 60));
+            return blobUrl;
+          }
+          // 3) 内置/外置主题：file:// 路径
+          if (theme.asset) return BASE + id + '/' + theme.asset;
+          return null;
+        }
+
         function renderTheme(id, instant) {
           console.log('[DW:render] START id=' + id + ' instant=' + instant);
           // 优先 _themes，fallback __DW_THEMES__（用户主题可能只注册到后者）
@@ -144,8 +166,8 @@
 
           if (theme.type === 'video') {
             var v = document.createElement('video');
-            // 用户上传主题用 blob URL，内置主题用 file:// 路径
-            var videoSrc = theme._blobUrl || (BASE + id + '/' + theme.asset);
+            // ★ 使用统一视频素材解析（_userData ArrayBuffer → Blob URL / file://）
+            var videoSrc = resolveVideoSource(theme, id);
             console.log('[DW:render] video src=' + videoSrc.substring(0, 120));
             
             // ★ 如果 file:// 加载失败，尝试 XHR 读取视频 → blob URL

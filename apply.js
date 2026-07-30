@@ -635,7 +635,7 @@ async function main() {
   }
   ok(`打包完成：${(fs.statSync(newAsar).size / 1048576).toFixed(1)} MB，耗时 ${((Date.now() - t1) / 1000).toFixed(1)} 秒`);
 
-  // 5b) 完整性校验：检查打包源 workDir 的内容（打包从此创建，源对即包对）
+  // 5b) 完整性校验：检查打包源 workDir + 最终 ASAR
   step('5b/6  校验完整性');
   const vHtml = read(idxPath);
 	  const needMarks = [MARK_BEGIN, BODY_MARK_BEGIN, SCRIPT_MARK_BEGIN, SWITCHER_MARK_BEGIN, WEATHER_MARK_BEGIN, ENGINE_MARK_BEGIN, PANEL_MARK_BEGIN, RAIN_MARK_BEGIN, SETTINGS_MARK_BEGIN];
@@ -664,7 +664,32 @@ async function main() {
       die(`完整性校验失败：壁纸不足（${wpCount}/${wpDirs.length * wpFiles.length}），已中止替换。`);
     }
   }
-  ok(`完整性校验通过（${needMarks.length} 标记` + (wpCount >= 0 ? ` + ${wpCount} 壁纸` : '') + `齐全）`);
+  ok(`源目录校验通过（${needMarks.length} 标记` + (wpCount >= 0 ? ` + ${wpCount} 壁纸` : '') + `齐全）`);
+
+  // 5c) 校验最终 ASAR 包可读且内容一致
+  step('5c/6  校验最终 ASAR 包');
+  try {
+    const lib = loadAsar();
+    if (!lib) { warn('ASAR 库不可用，跳过最终包校验'); }
+    else {
+      // 从 ASAR 中提取 index.html 并验证标记
+      const extractDir = path.join(os.tmpdir(), 'zcode-wp-verify-' + Date.now());
+      rmrf(extractDir);
+      fs.mkdirSync(extractDir, { recursive: true });
+      lib.extractAll(newAsar, extractDir);
+      const extractedHtml = read(path.join(extractDir, 'out', 'renderer', 'index.html'));
+      const verifyMissing = needMarks.filter(m => !extractedHtml.includes(m));
+      if (verifyMissing.length > 0) {
+        rmrf(extractDir); rmrf(workDir); rmrf(newAsar);
+        die(`最终 ASAR 校验失败：缺少标记 ${verifyMissing.join(', ')}，打包可能不完整。`);
+      }
+      rmrf(extractDir);
+      ok(`最终 ASAR 验证通过（${needMarks.length} 标记齐全）`);
+    }
+  } catch (verr) {
+    rmrf(workDir); rmrf(newAsar);
+    die(`最终 ASAR 校验异常：${verr.message}`);
+  }
 
   // 6) 备份 + 原子替换
   step('6/6  备份原文件并原子替换');
@@ -680,13 +705,12 @@ async function main() {
     const tmpSize = fs.statSync(tmpPath).size;
     const newSize = fs.statSync(newAsar).size;
     if (tmpSize !== newSize) throw new Error(`临时文件大小不匹配 (${tmpSize} vs ${newSize})`);
-    // 尝试原子 rename；如被占用则降级为 copyFileSync
+    // 原子 rename（如被占用则明确报错，不允许非原子覆盖）
     try { fs.renameSync(tmpPath, asarPath); ok('已原子替换 app.asar'); }
     catch (rErr) {
+      try { if (exists(tmpPath)) fs.unlinkSync(tmpPath); } catch(_) {}
       if (rErr.code === 'EPERM' || rErr.code === 'EBUSY') {
-        fs.copyFileSync(tmpPath, asarPath);
-        try { fs.unlinkSync(tmpPath); } catch(_) {}
-        ok('已替换 app.asar（copy 降级，因文件被占用）');
+        die(`app.asar 被占用（${rErr.code}），请完全退出 ZCode 后重试。`);
       } else throw rErr;
     }
   } catch (e) {
