@@ -1,8 +1,6 @@
 {
   "themes": [
-    "doraemon",
-    "lazy-sheep",
-    "cloud-sea"
+    "doraemon"
   ],
   "default": "doraemon"
 }

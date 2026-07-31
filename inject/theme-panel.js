@@ -413,25 +413,52 @@
           // 导出
           var expBtn = document.getElementById('dw-export-btn');
           if (expBtn) expBtn.onclick = function () {
-            var list = (window.__DW_USER_THEMES__ || []).map(function (t) {
+            // 对大视频走 Blob + FileReader.readAsDataURL（native base64，异步、不阻塞 UI 线程）；
+            // 对小图直接拷 data:URL 字符串。
+            var themes = window.__DW_USER_THEMES__ || [];
+            var prepared = themes.map(function (t) {
               var c = {};
               for (var k in t) {
                 if (k === '_userData' && t._userData instanceof ArrayBuffer) {
-                  var bytes = new Uint8Array(t._userData);
-                  var bin = '';
-                  for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-                  c._userData = { _encoding: 'base64', _mime: t._userDataMime || 'video/mp4', _data: btoa(bin) };
-                } else { c[k] = t[k]; }
+                  return new Promise(function (resolve) {
+                    var mime = t._userDataMime || 'video/mp4';
+                    var blob = new Blob([t._userData], { type: mime });
+                    var r = new FileReader();
+                    r.onload = function () {
+                      // data:[mime];base64,XXXX → 拆出 mime 与 data
+                      var s = String(r.result || '');
+                      var comma = s.indexOf(',');
+                      var meta = comma >= 0 ? s.slice(0, comma) : ('data:' + mime + ';base64');
+                      var b64 = comma >= 0 ? s.slice(comma + 1) : '';
+                      var m = /data:([^;]+)/.exec(meta);
+                      c._userData = { _encoding: 'base64', _mime: m ? m[1] : mime, _data: b64 };
+                      for (var k2 in t) if (k2 !== '_userData') c[k2] = t[k2];
+                      resolve(c);
+                    };
+                    r.onerror = function () {
+                      // base64 失败则降级：只导出元数据，_userData 留空
+                      for (var k2 in t) if (k2 !== '_userData') c[k2] = t[k2];
+                      c._userData = null;
+                      c._exportError = 'binary serialize failed';
+                      resolve(c);
+                    };
+                    r.readAsDataURL(blob);
+                  });
+                } else {
+                  c[k] = t[k];
+                }
               }
               return c;
             });
-            var data = JSON.stringify({ _formatVersion: 2, themes: list });
-            var a = document.createElement('a');
-            var blob = new Blob([data], { type: 'application/json' });
-            a.href = URL.createObjectURL(blob);
-            a.download = 'zcode-themes-' + new Date().toISOString().slice(0, 10) + '.zctheme';
-            a.click();
-            setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+            Promise.all(prepared).then(function (list) {
+              var data = JSON.stringify({ _formatVersion: 2, themes: list });
+              var a = document.createElement('a');
+              var blob = new Blob([data], { type: 'application/json' });
+              a.href = URL.createObjectURL(blob);
+              a.download = 'zcode-themes-' + new Date().toISOString().slice(0, 10) + '.zctheme';
+              a.click();
+              setTimeout(function () { URL.revokeObjectURL(a.href); }, 1000);
+            });
           };
 
           // 导入
@@ -454,11 +481,25 @@
                       console.warn('[DW] 跳过导入：ID 不合法「' + t.id + '」');
                       return;
                     }
-                    if (t._userData && t._userData._encoding === 'base64' && t._userData._data) {
-                      var bin = atob(t._userData._data);
-                      var bytes = new Uint8Array(bin.length);
-                      for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-                      t._userData = t.fileType === 'video' ? bytes.buffer : ('data:' + (t._userData._mime || 'image/png') + ';base64,' + t._userData._data);
+                    if (t._userData) {
+                      if (t._userData._encoding === 'base64' && t._userData._data) {
+                        // —— 对象形式：{ _encoding: 'base64', _mime, _data }
+                        var bin = atob(t._userData._data);
+                        var bytes = new Uint8Array(bin.length);
+                        for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+                        t._userData = t.fileType === 'video'
+                          ? bytes.buffer
+                          : ('data:' + (t._userData._mime || 'image/png') + ';base64,' + t._userData._data);
+                      } else if (typeof t._userData === 'string') {
+                        // —— 字符串形式：data: URL 或 base64 字符串，原样保留
+                        // 这里不再二次转换，避免过去某些导出路径下产生双重 base64 包装。
+                      } else if (t._userData instanceof ArrayBuffer) {
+                        // —— 已经是二进制 buffer：保留
+                      } else {
+                        // 未知形状：清掉，防止后续渲染炸
+                        console.warn('[DW] 跳过导入：_userData 形状未知', t.id);
+                        t._userData = null;
+                      }
                     }
                     decoded.push(t);
                   });
@@ -524,8 +565,17 @@
               }).then(function (dbList) {
                 window.__DW_USER_THEMES__ = dbList;
               }).catch(function (dbErr) {
+                // 保存失败：从内存和用户列表里把刚加进去的那条清掉，避免面板里看着有、
+                // 重启后从 DB 读不到又神秘消失的"幽灵主题"现象。
                 console.warn('[DW] IndexedDB 保存失败:', dbErr);
-                toast('⚠️ 保存失败，主题可能重启后丢失');
+                if (window.__DW_THEMES__ && window.__DW_THEMES__[id]) delete window.__DW_THEMES__[id];
+                window.__DW_USER_THEMES__ = (window.__DW_USER_THEMES__ || []).filter(function (t) { return t.id !== id; });
+                // 如果当前正显示这个主题，切回 doraemon
+                if (window.__dwGetActiveTheme && window.__dwGetActiveTheme() === id && window.__dwSwitchTheme) {
+                  window.__dwSwitchTheme('doraemon');
+                }
+                toast('⚠️ 保存失败，主题已移除（请重试）');
+                buildPanel();
               });
             }
             
@@ -565,7 +615,14 @@
                 for (var pk in datas) { firstData = datas[pk]; break; }
                 periods.forEach(function (p) {
                   if (datas[p]) { assets.clear[p] = 'bg-' + p + '.png'; assets.rain[p] = 'bg-' + p + '.png'; }
-                  else { assets.clear[p] = 'bg-fallback.png'; assets.rain[p] = 'bg-fallback.png'; datas[p] = firstData; }
+                  else {
+                    // 缺失时段用已上传的首张图填充（实际渲染时也走 datas[p] 兜底）。
+                    // 路径使用 'bg-morning.png' 而非 'bg-fallback.png'，避免未来任何渲染路径
+                    // 真去加载资源路径时 404。
+                    assets.clear[p] = 'bg-morning.png';
+                    assets.rain[p] = 'bg-morning.png';
+                    if (firstData) datas[p] = firstData;
+                  }
                 });
                 var theme = { id: id, name: name, type: 'static', periods: true, weather: false, desc: '🖼 ' + name + '（四时段）', fileType: 'image', assets: assets, _isUser: true };
                 periods.forEach(function (p) { if (datas[p]) theme['_data_' + p] = datas[p]; });

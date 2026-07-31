@@ -58,7 +58,7 @@
             }
             return null;
           }).catch(function (e) {
-            console.info('[DW] registry.js 不可用: ' + (e && e.message ? e.message : e));
+            console.warn('[DW] registry.js 不可用: ' + (e && e.message ? e.message : e));
             return null;
           });
         }
