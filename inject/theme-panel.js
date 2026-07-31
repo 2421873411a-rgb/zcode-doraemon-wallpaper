@@ -5,7 +5,7 @@
 	        // ★ 可见标记（已移除版本标签）
 
         var PANEL = null, UPLOAD_MODE = false, UPLOAD_MULTI = false;
-        var _searchQuery = '', _showSettings = false;
+        var _searchQuery = '', _showSettings = false, _showAdjust = false;
 
         // —— 工具函数 ——
         function ready(fn) { if (window.__dwGetActiveTheme) fn(); else setTimeout(function(){ready(fn);},100); }
@@ -257,6 +257,28 @@
             if (filtered.length === 0) html += '<div style="text-align:center;opacity:0.4;padding:20px;">无匹配主题</div>';
             html += '</div>';
 
+            // —— 调参折叠区（模糊 / 亮度）——
+            var _blurVal = (window.__dwGetBlur ? window.__dwGetBlur() : 0);
+            var _brightPct = (window.__dwGetBrightness ? window.__dwGetBrightness() : 1) * 100;
+            var _brightPctStr = _brightPct.toFixed(0);
+            var _blurStr = (Math.round(_blurVal * 10) / 10).toString();
+            html += '<div id="dw-adjust-toggle" data-open="' + (_showAdjust ? '1' : '0') + '" style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;margin:2px 0 4px;border-radius:6px;background:rgba(255,255,255,0.04);cursor:pointer;font-size:11px;user-select:none;">' +
+              '<span>🎛 调参（模糊/亮度）</span>' +
+              '<span style="opacity:0.5;font-size:10px;">' + (_showAdjust ? '▾' : '▸') + '</span></div>';
+            if (_showAdjust) {
+              html += '<div style="padding:8px 8px 6px;background:rgba(0,0,0,0.22);border-radius:6px;margin-bottom:6px;font-size:11px;">' +
+                '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">' +
+                '<span style="opacity:0.7;width:30px;flex-shrink:0;">模糊</span>' +
+                '<input id="dw-blur-slider" type="range" min="0" max="20" step="0.5" value="' + _blurStr + '" style="flex:1;accent-color:#7eb6ff;cursor:pointer;">' +
+                '<span id="dw-blur-val" style="width:48px;text-align:right;font-variant-numeric:tabular-nums;opacity:0.85;">' + _blurStr + 'px</span></div>' +
+                '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">' +
+                '<span style="opacity:0.7;width:30px;flex-shrink:0;">亮度</span>' +
+                '<input id="dw-bright-slider" type="range" min="50" max="150" step="1" value="' + _brightPctStr + '" style="flex:1;accent-color:#7eb6ff;cursor:pointer;">' +
+                '<span id="dw-bright-val" style="width:48px;text-align:right;font-variant-numeric:tabular-nums;opacity:0.85;">' + _brightPctStr + '%</span></div>' +
+                '<div style="text-align:right;">' +
+                '<button id="dw-adjust-reset" style="padding:2px 10px;border:none;border-radius:4px;background:rgba(255,255,255,0.08);color:#fff;cursor:pointer;font-size:10px;">↺ 重置默认</button></div></div>';
+            }
+
             // 上传区域
             if (!UPLOAD_MODE) {
               html += '<div id="dw-add-btn" style="padding:6px;text-align:center;cursor:pointer;border:1px dashed rgba(255,255,255,0.2);border-radius:7px;font-size:12px;margin-bottom:6px;">➕ 上传新主题</div>';
@@ -363,6 +385,41 @@
           PANEL.querySelectorAll('.dw-copy-btn').forEach(function (btn) {
             btn.onclick = function (e) { e.stopPropagation(); copyBuiltinTheme(btn.dataset.id); };
           });
+
+          // —— 调参折叠 ——
+          var adjTog = document.getElementById('dw-adjust-toggle');
+          if (adjTog) adjTog.onclick = function (e) { e.stopPropagation(); _showAdjust = !_showAdjust; buildPanel(); };
+
+          // 模糊滑块：oninput 实时更新 CSS 变量 + 数值显示
+          var blurSlider = document.getElementById('dw-blur-slider');
+          var blurValEl = document.getElementById('dw-blur-val');
+          if (blurSlider) blurSlider.oninput = function () {
+            var v = parseFloat(this.value);
+            if (window.__dwSetBlur) window.__dwSetBlur(v);
+            if (blurValEl) {
+              // 去掉无意义的尾零（3.0 → 3，2.5 保留）
+              var s = (Math.round(v * 10) / 10).toString();
+              blurValEl.textContent = s + 'px';
+            }
+          };
+
+          // 亮度滑块
+          var brSlider = document.getElementById('dw-bright-slider');
+          var brValEl = document.getElementById('dw-bright-val');
+          if (brSlider) brSlider.oninput = function () {
+            var pct = parseInt(this.value, 10);
+            if (window.__dwSetBrightness) window.__dwSetBrightness(pct / 100);
+            if (brValEl) brValEl.textContent = pct + '%';
+          };
+
+          // 重置按钮
+          var rstBtn = document.getElementById('dw-adjust-reset');
+          if (rstBtn) rstBtn.onclick = function (e) {
+            e.stopPropagation();
+            if (window.__dwSetBlur) window.__dwSetBlur(0);
+            if (window.__dwSetBrightness) window.__dwSetBrightness(1);
+            buildPanel();
+          };
 
           // 上传按钮（★ 必须 stopPropagation，否则 buildPanel 重建 DOM 后点击冒泡到 document 会被误判为"外部点击"而关闭面板）
           var addBtn = document.getElementById('dw-add-btn');

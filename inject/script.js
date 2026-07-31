@@ -203,10 +203,43 @@
 		          }
 		        };
 
-		        // —— 启动 ——
-		        document.documentElement.classList.add('zcode-wallpaper-on');
-		        // 恢复壁纸缩放模式
-		        try { var f = localStorage.getItem('dw-fit'); if (f) document.documentElement.style.setProperty('--dw-fit', f); } catch(e) {}
+// —— 启动 ——
+        document.documentElement.classList.add('zcode-wallpaper-on');
+        // 恢复壁纸缩放模式
+        try { var f = localStorage.getItem('dw-fit'); if (f) document.documentElement.style.setProperty('--dw-fit', f); } catch(e) {}
+
+        // ============ 壁纸调参（blur / brightness）============
+        // 由弹窗里的滑块控制；CSS 变量 --dw-blur / --dw-brightness
+        // 被 #doraemon-wallpaper .dw-layer / video 引用。
+        // 值持久化在 localStorage：dw-blur（数字字符串，px 单位）、dw-brightness（0.5~1.5）。
+        function _dwClamp(v, lo, hi) { v = Number(v); if (!isFinite(v)) return lo; if (v < lo) return lo; if (v > hi) return hi; return v; }
+        window.__dwGetBlur = function () {
+          var v = document.documentElement.style.getPropertyValue('--dw-blur');
+          return v ? (parseFloat(v) || 0) : 0;
+        };
+        window.__dwSetBlur = function (v) {
+          v = _dwClamp(v, 0, 20);
+          document.documentElement.style.setProperty('--dw-blur', v + 'px');
+          try { localStorage.setItem('dw-blur', String(v)); } catch (e) {}
+        };
+        window.__dwGetBrightness = function () {
+          var v = document.documentElement.style.getPropertyValue('--dw-brightness');
+          return v ? (parseFloat(v) || 1) : 1;
+        };
+        window.__dwSetBrightness = function (v) {
+          v = _dwClamp(v, 0.5, 1.5);
+          document.documentElement.style.setProperty('--dw-brightness', String(v));
+          try { localStorage.setItem('dw-brightness', String(v)); } catch (e) {}
+        };
+        // 启动恢复（紧跟 zcode-wallpaper-on class，确保 CSS 变量作用域已建立）
+        try {
+          var b = localStorage.getItem('dw-blur');
+          if (b !== null) document.documentElement.style.setProperty('--dw-blur', parseFloat(b) + 'px');
+        } catch (e) {}
+        try {
+          var br = localStorage.getItem('dw-brightness');
+          if (br !== null) document.documentElement.style.setProperty('--dw-brightness', String(parseFloat(br)));
+        } catch (e) {}
 		        function startWhenReady() {
 		          if (window.__dwGetActiveTheme) { tick(); setInterval(tick, 60000); }
 		          else setTimeout(startWhenReady, 100);

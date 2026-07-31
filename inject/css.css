@@ -27,6 +27,15 @@
       #doraemon-wallpaper video {
         object-fit: var(--dw-fit, cover) !important;
       }
+      /* 壁纸调参（弹窗里的滑块控制）：模糊 + 亮度 */
+      #doraemon-wallpaper .dw-layer {
+        filter: blur(var(--dw-blur, 0px)) brightness(var(--dw-brightness, 1));
+      }
+      /* 视频元素在主题引擎里用 Object.assign(v.style, {...}) 直接写内联样式，
+         所以这里必须用 !important 才能压过内联 transform 之类以外的样式优先级 */
+      #doraemon-wallpaper video {
+        filter: blur(var(--dw-blur, 0px)) brightness(var(--dw-brightness, 1)) !important;
+      }
       #doraemon-wallpaper .dw-layer.dw-active {
         opacity: 1;
       }
@@ -82,6 +91,9 @@
         --dw-btn-border: rgba(255, 255, 255, 0.45);
         --dw-btn-hover-bg: rgba(255, 255, 255, 0.18);
         --dw-icon-shadow: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+        /* 壁纸调参（弹窗里的滑块控制）：blur(0~20px) + brightness(0.5~1.5) */
+        --dw-blur: 0px;
+        --dw-brightness: 1;
       }
 
       /* 保持输入框原生背景，只改文字颜色 */
