@@ -221,7 +221,32 @@
 
         // 对外接口
         window.__dwSwitchTheme = function (id) {
-          var all = _themes || window.__DW_THEMES__ || FALLBACK;
+          // Multi-source lookup, in decreasing probability of containing the id:
+          //   1) window.__DW_THEMES__ — populated by registerUserThemes with full fields
+          //   2) _themes — engine closure, holds built-in / external themes from bootPhase2
+          //   3) FALLBACK — last-resort hard-coded defaults
+          //   4) window.__DW_USER_THEMES__ — raw IndexedDB list; in edge cases
+          //      (registerUserThemes never ran / failed / list was empty), the user
+          //      theme only lives here. On hit we back-write to (1) and (2) so
+          //      renderTheme / themeAsset see the full theme object.
+          //
+          // The old order `_themes || window.__DW_THEMES__ || FALLBACK` silently
+          // failed for every user-uploaded theme because the engine closure
+          // `_themes` is only ever repointed by bootPhase2 (built-in only) and
+          // never receives user themes — those are added via registerUserThemes
+          // into __DW_THEMES__, not _themes.
+          var all = window.__DW_THEMES__ || _themes || FALLBACK;
+          if (!all[id] && Array.isArray(window.__DW_USER_THEMES__)) {
+            for (var i = 0; i < window.__DW_USER_THEMES__.length; i++) {
+              var u = window.__DW_USER_THEMES__[i];
+              if (u && u.id === id) {
+                if (!window.__DW_THEMES__) window.__DW_THEMES__ = {};
+                window.__DW_THEMES__[id] = u;
+                all = window.__DW_THEMES__;
+                break;
+              }
+            }
+          }
           if (!all[id]) { console.warn('[DW] 主题不存在: ' + id); return false; }
           if (!_themes[id] && all[id]) { _themes[id] = all[id]; }
           try { localStorage.setItem(STORAGE_KEY, id); } catch (e) {}
