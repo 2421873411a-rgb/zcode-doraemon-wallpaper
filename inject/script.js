@@ -119,12 +119,31 @@
 		        };
 
 		        // ============ 壁纸亮度自适应 ============
+		        // LRU 缓存：URL 数量超过上限时按插入顺序淘汰最早的。
+		        // 上限给 64 已经远超日常可见主题数 + 时段 + 晴雨组合。
+		        var BRIGHTNESS_CACHE_MAX = 64;
 		        var _brightnessCache = {};
+		        var _brightnessCacheOrder = []; // 插入顺序
 		        var _lastBrightCheck = { period: '', theme: '', weather: '' };
+
+		        function _brightnessCacheGet(url) {
+		          return _brightnessCache[url];
+		        }
+		        function _brightnessCacheSet(url, lum) {
+		          if (_brightnessCache[url] === undefined) {
+		            _brightnessCacheOrder.push(url);
+		            if (_brightnessCacheOrder.length > BRIGHTNESS_CACHE_MAX) {
+		              var evict = _brightnessCacheOrder.shift();
+		              delete _brightnessCache[evict];
+		            }
+		          }
+		          _brightnessCache[url] = lum;
+		        }
 
 		        function detectBrightness(url, cb) {
 		          if (!url || typeof url !== 'string') { if (cb) cb(null); return; }
-		          if (_brightnessCache[url] !== undefined) { if (cb) cb({ luminance: _brightnessCache[url] }); return; }
+		          var cached = _brightnessCacheGet(url);
+		          if (cached !== undefined) { if (cb) cb({ luminance: cached }); return; }
 		          var img = new Image();
 		          img.onload = function () {
 		            try {
@@ -134,7 +153,7 @@
 		              ctx.drawImage(img, 0, 0, 1, 1);
 		              var d = ctx.getImageData(0, 0, 1, 1).data;
 		              var lum = (0.299 * d[0] + 0.587 * d[1] + 0.114 * d[2]) / 255;
-		              _brightnessCache[url] = lum;
+		              _brightnessCacheSet(url, lum);
 		              if (cb) cb({ luminance: lum });
 		            } catch (e) { if (cb) cb(null); }
 		          };

@@ -84,17 +84,6 @@ function read(p) { return fs.readFileSync(p, 'utf8'); }
 function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
 function rmrf(p) { if (exists(p)) fs.rmSync(p, { recursive: true, force: true }); }
 
-// SHA-256 哈希
-function sha256(filePath) {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash('sha256');
-    const stream = fs.createReadStream(filePath);
-    stream.on('data', (d) => hash.update(d));
-    stream.on('end', () => resolve(hash.digest('hex')));
-    stream.on('error', reject);
-  });
-}
-
 // 同步版 SHA-256（小文件用）
 function sha256Sync(filePath) {
   const content = fs.readFileSync(filePath);
@@ -592,17 +581,24 @@ async function main() {
   step('2/6  检测 ZCode 进程');
   const forceInstall = process.argv.includes('--force');
   let running = false;
-  try {
-    const out = execSync('tasklist /FI "IMAGENAME eq ZCode.exe" /NH', { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
-    running = /ZCode\.exe/i.test(out);
-  } catch {}
+  if (process.platform === 'win32') {
+    try {
+      const out = execSync('tasklist /FI "IMAGENAME eq ZCode.exe" /NH', { stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+      running = /ZCode\.exe/i.test(out);
+    } catch (e) {
+      warn('无法通过 tasklist 检测 ZCode 进程：' + (e.message || e));
+    }
+  } else {
+    // macOS / Linux 没有 tasklist；不假设 ZCode 未运行，让用户自己确保已关闭。
+  }
   if (running && !forceInstall) {
     die('检测到 ZCode 正在运行。请完全退出 ZCode 后再运行。\n如需强制，使用 --force（有损坏风险）。');
   }
   if (running && forceInstall) {
     warn('ZCode 正在运行，--force 模式：风险自担');
   } else if (!running) {
-    ok('ZCode 未运行');
+    if (process.platform === 'win32') ok('ZCode 未运行');
+    else warn('非 Windows 平台：跳过进程检测，请手动确认 ZCode 已关闭');
   }
 
   // ---- 事务开始 ----
@@ -691,7 +687,9 @@ async function main() {
   step('3c/6  部署内置主题');
   const projectThemes = path.join(SCRIPT_DIR, 'themes');
   syncBundledThemes(projectThemes, themesDir);
-  const themesBaseUrl = 'file:///' + themesDir.replace(/\\/g, '/') + '/';
+  // 用 pathToFileURL 处理空格 / 中文 / 特殊字符的 URI 编码，
+  // 避免装在 "C:\Program Files (x86)\ZCode" 等带空格路径下 fetch/video src 行为不一致。
+  const themesBaseUrl = require('url').pathToFileURL(themesDir).href.replace(/\/?$/, '/');
   let fallbackThemes = { __default__: 'doraemon' };
   try {
     const regPath = path.join(themesDir, '_registry.json');
@@ -713,6 +711,11 @@ async function main() {
   if (engineTpl) {
     engineTpl = engineTpl.replace('__BASE_TOKEN__', JSON.stringify(themesBaseUrl));
     engineTpl = engineTpl.replace('__FALLBACK_TOKEN__', JSON.stringify(fallbackThemes));
+    // 防御：若模板里仍残留占位符（例如上游重命名了 token），拒绝继续注入。
+    // 字面 __BASE_TOKEN__ / __FALLBACK_TOKEN__ 进入 asar 会在启动时直接抛 SyntaxError。
+    if (engineTpl.includes('__BASE_TOKEN__') || engineTpl.includes('__FALLBACK_TOKEN__')) {
+      die('主题引擎模板中存在未替换的占位符（__BASE_TOKEN__ / __FALLBACK_TOKEN__）。拒绝注入以避免运行时崩溃。');
+    }
   }
 
   // ---- 4) 注入 ----
