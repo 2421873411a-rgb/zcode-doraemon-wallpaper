@@ -9,7 +9,7 @@
 
         // —— 工具函数 ——
         function ready(fn) { if (window.__dwGetActiveTheme) fn(); else setTimeout(function(){ready(fn);},100); }
-        function esc(s) { if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+        function esc(s) { if(!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
         function toast(msg) {
           var t = document.createElement('div'); t.textContent = msg;
           t.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);z-index:2147483647;padding:8px 20px;border-radius:20px;background:rgba(0,0,0,0.8);color:#fff;font-size:13px;font-family:system-ui;pointer-events:none;transition:opacity .3s;opacity:0;';
@@ -73,9 +73,11 @@
         // 内置/外置静态主题直接用 file:// 路径（短，CSS 直接显示，不经过 canvas 避免跨域污染）
 
         // ★ 主题 ID 安全校验
+        // 拒绝原型链 + Object.prototype 上常见方法名（防御性 deny-list）
+        var FORBIDDEN_IDS = /^(?:__proto__|prototype|constructor|__default__|toString|hasOwnProperty|valueOf|isPrototypeOf|propertyIsEnumerable|toLocaleString)$/;
         function validateThemeId(id) {
           if (!id || typeof id !== 'string') return false;
-          if (/^(__proto__|prototype|constructor|__default__)$/.test(id)) return false;
+          if (FORBIDDEN_IDS.test(id)) return false;
           return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(id);
         }
 
@@ -283,7 +285,11 @@
 
             PANEL.innerHTML = html;
             bindEvents();
-          } catch (e) { PANEL.innerHTML = '<div style="text-align:center;color:#f66;padding:10px;">面板错误: ' + (e.message || e) + '</div>'; }
+          } catch (e) {
+            // 用 textContent 而非 innerHTML 拼接，避免 e.message 含 HTML 时被注入
+            PANEL.innerHTML = '<div style="text-align:center;color:#f66;padding:10px;"></div>';
+            PANEL.firstChild.textContent = '面板错误: ' + (e && e.message ? e.message : String(e));
+          }
         }
 
         // —— 事件绑定 ——
