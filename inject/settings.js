@@ -29,10 +29,15 @@
 	          try { localStorage.setItem('dw-weather-config', JSON.stringify(cfg)); } catch (e) {}
 	        }
 
-	        function getVal(key) {
-	          var cfg = loadConfig();
-	          return cfg[key] !== undefined ? cfg[key] : DEFAULTS[key];
-	        }
+function getVal(key) {
+          var cfg = loadConfig();
+          var v = cfg[key];
+          if (v !== undefined && v !== null) return v;
+          // DEFAULTS 上没声明过的 key（新增字段忘记补默认值）也兜底成 ''，
+          // 避免拼接进 value="" 时变成字符串 "undefined"。
+          var d = DEFAULTS[key];
+          return (d === undefined || d === null) ? '' : d;
+        }
 
 	        function buildSettingsPanel() {
 	          if (!SETTINGS_PANEL || !document.body.contains(SETTINGS_PANEL)) return;
